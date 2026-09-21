@@ -1,0 +1,14 @@
+<Application
+    x:Class="SPPAudioStudio.Windows.App"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    RequestedTheme="Dark">
+    <Application.Resources>
+        <ResourceDictionary>
+            <Color x:Key="AccentColor">#7C8CFF</Color>
+            <SolidColorBrush x:Key="CardBrush" Color="#171A22"/>
+            <SolidColorBrush x:Key="CardBorderBrush" Color="#353A47"/>
+            <SolidColorBrush x:Key="MutedBrush" Color="#9CA3B5"/>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>
