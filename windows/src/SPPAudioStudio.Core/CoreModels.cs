@@ -89,11 +89,13 @@ public sealed class WorkerUnavailableException(string message) : InvalidOperatio
 public sealed class MissingWorkerService : IWorkerService
 {
     public const string MissingMessage = "Windows Worker 尚未集成；当前版本仅提供界面与 C# 核心骨架。";
+    private readonly string _message;
+    public MissingWorkerService(string? message = null) => _message = message ?? MissingMessage;
     public Task<WorkerStatus> CheckAsync(CancellationToken cancellationToken = default) =>
-        Task.FromResult(new WorkerStatus(false, MissingMessage));
+        Task.FromResult(new WorkerStatus(false, _message));
 
     public Task<string> ExecuteAsync(WorkerCommand command, CancellationToken cancellationToken = default) =>
-        Task.FromException<string>(new WorkerUnavailableException(MissingMessage));
+        Task.FromException<string>(new WorkerUnavailableException(_message));
 }
 
 public sealed record VoiceCloneRequest(string? TemplateId, string? ReferenceAudioPath, string Script, string? OutputDirectory)
