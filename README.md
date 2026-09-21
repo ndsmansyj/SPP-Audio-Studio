@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/icon/pixel_icon_1024.png" width="156" alt="SPP Audio Studio 图标">
+<img src="assets/icon/readme_icon.png" width="156" height="156" alt="SPP Audio Studio 图标">
 
 # SPP Audio Studio
 
