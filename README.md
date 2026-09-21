@@ -31,7 +31,8 @@
 - 支持 Apple Silicon Mac，目标系统为 macOS 14 及更新版本；暂不支持 Intel Mac。
 - 音频默认在本机处理。源文件只读；同名输出会自动加序号。
 - AI 功能所需的模型与运行环境可在应用的「模型与环境」页面一键安装，也可链接已有的本地模型。
-- `.ncm` 转换会保留文件中已有的歌曲信息和封面；若源文件本身没有内嵌封面，导出文件也可能没有封面。
+- 特殊格式转换在公开构建中通过你本机自行准备的兼容转换器完成；只需在「模型与环境」选择一次，格式转换页仍保持拖入即用。SPP Audio Studio 不下载、不捆绑或指定任何具体第三方转换器。
+- 转换后的 MP3 / FLAC 会尽量保留可用的歌曲信息和封面；若来源本身没有可用封面，导出文件也可能没有封面。
 - 本机脚本可通过 [本机 API](LOCAL_API.md) 调用转换、人声分离和克隆。
 - 当前 0.3.0 RC 版本正在跨设备测试。安装包与更新信息见 [Releases](https://github.com/ndsmansyj/SPP-Audio-Studio/releases)；测试反馈可提交 [Issue](https://github.com/ndsmansyj/SPP-Audio-Studio/issues)。
 
@@ -54,6 +55,8 @@
 ```bash
 ./scripts/build_local.sh
 ```
+
+默认构建不包含内置特殊格式解密核心，仅保留 External Converter Adapter。仅用于私有兼容性测试时，可显式设置 `SPP_INCLUDE_BUILTIN_NCM=1` 再构建。
 
 ## 许可证
 

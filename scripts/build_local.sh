@@ -36,7 +36,12 @@ cp "$ROOT/assets/default_voice/reference.wav" "$ROOT/assets/default_voice/refere
 ditto "$PYTHON_CORE_SOURCE" "$APP/Contents/Resources/runtime/python"
 chmod 755 "$APP/Contents/Resources/runtime/python/bin/python3.11"
 
-swiftc -O "$ROOT/format_converter/main.swift" \
+FORMAT_CONVERTER_FLAGS=()
+if [ "${SPP_INCLUDE_BUILTIN_NCM:-0}" != "1" ]; then
+  FORMAT_CONVERTER_FLAGS+=("-D" "SPP_NO_BUILTIN_NCM")
+fi
+
+swiftc -O "${FORMAT_CONVERTER_FLAGS[@]}" "$ROOT/format_converter/main.swift" \
   -framework AppKit -framework UniformTypeIdentifiers \
   -o "$APP/Contents/Resources/bin/format_converter"
 

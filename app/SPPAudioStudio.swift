@@ -158,6 +158,7 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published var modelBusy: String?
     @Published var runtimeBusy: String?
     @Published var modelStatusMessage = ""
+    @Published var externalConverterPath = ""
 
     @Published var previewPath: String?
     @Published var previewIsPlaying = false
@@ -172,7 +173,44 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
 
     override init() {
         super.init()
+        refreshExternalConverter()
         logger.append("app.log", "app launch version=\(appVersion)")
+    }
+
+    private var externalConverterConfigURL: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory())
+        return base.appendingPathComponent("SPP Audio Studio/external_converter.json")
+    }
+
+    func refreshExternalConverter() {
+        guard let data = try? Data(contentsOf: externalConverterConfigURL),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let command = object["command"] as? String else {
+            externalConverterPath = ""
+            return
+        }
+        externalConverterPath = command.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func saveExternalConverterPath(_ path: String) {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        let url = externalConverterConfigURL
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let data = try JSONSerialization.data(
+                withJSONObject: ["command": trimmed],
+                options: [.prettyPrinted, .sortedKeys]
+            )
+            try data.write(to: url, options: .atomic)
+            externalConverterPath = trimmed
+            modelStatusMessage = trimmed.isEmpty ? "已清除外部格式转换器设置" : "已保存外部格式转换器"
+        } catch {
+            modelStatusMessage = "保存外部格式转换器失败：\(error.localizedDescription)"
+        }
     }
 
     private var appVersion: String {
@@ -1689,6 +1727,44 @@ struct EnvironmentView: View {
                     .frame(width: 210)
                 }
 
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("外部格式转换器（可选）").font(.headline)
+                            Text("如需使用本机已有的兼容转换器，可在这里选择一次；格式转换页保持原来的拖入即用体验。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Text(state.externalConverterPath.isEmpty ? "未设置" : "已设置")
+                            .font(.caption.weight(.medium))
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4)
+                            .background(Color.white.opacity(0.07), in: Capsule())
+                            .foregroundStyle(state.externalConverterPath.isEmpty ? Color.secondary : Color.green)
+                    }
+
+                    HStack(spacing: 8) {
+                        Text(state.externalConverterPath.isEmpty ? "未选择本地转换器" : state.externalConverterPath)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                        Spacer(minLength: 8)
+                        Button("选择…") { chooseExternalConverter() }
+                        if !state.externalConverterPath.isEmpty {
+                            Button("清除") { state.saveExternalConverterPath("") }
+                        }
+                    }
+
+                    Text("只保存本机路径，不下载、不捆绑任何第三方转换器。")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(16)
+                .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
+
                 HStack(alignment: .top, spacing: 14) {
                     modelCard(
                         kind: "qwen",
@@ -1921,6 +1997,17 @@ struct EnvironmentView: View {
         }
         .padding(16)
         .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func chooseExternalConverter() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.prompt = "选择"
+        if panel.runModal() == .OK, let url = panel.url {
+            state.saveExternalConverterPath(url.path)
+        }
     }
 
     private var runtimeSummary: String {
