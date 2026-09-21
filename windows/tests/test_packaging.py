@@ -78,6 +78,11 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertIn("release-manifest.json", text)
         self.assertRegex(text, re.compile(r"Get-FileHash.+SHA256", re.DOTALL))
 
+    def test_publish_writes_portable_lf_checksum_files(self) -> None:
+        text = (WINDOWS / "publish.ps1").read_text(encoding="utf-8")
+        self.assertRegex(text, r"WriteAllText\(\$checksumPath")
+        self.assertRegex(text, r"WriteAllText\(\"\$archive\.sha256\"")
+
     def test_build_discovers_the_actual_windows_test_tree(self) -> None:
         text = (WINDOWS / "build.ps1").read_text(encoding="utf-8")
         self.assertIn("Join-Path $PSScriptRoot 'tests'", text)

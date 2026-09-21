@@ -91,14 +91,14 @@ try {
         $relative = $_.FullName.Substring($publishRoot.Length + 1).Replace('\', '/')
         "{0} *{1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $relative
     })
-    Set-Content $checksumPath $checksumLines -Encoding ASCII
+    [IO.File]::WriteAllText($checksumPath, ($checksumLines -join "`n") + "`n", [Text.Encoding]::ASCII)
 
     if (-not $NoArchive) {
         $archive = Join-Path $packageRoot "SPPAudioStudio-$Version-$runtime.zip"
         if (Test-Path $archive) { Remove-Item $archive -Force }
         Compress-Archive -Path (Join-Path $publishRoot '*') -DestinationPath $archive -CompressionLevel Optimal
         $archiveHash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-        Set-Content "$archive.sha256" "$archiveHash *$([IO.Path]::GetFileName($archive))" -Encoding ASCII
+        [IO.File]::WriteAllText("$archive.sha256", "$archiveHash *$([IO.Path]::GetFileName($archive))`n", [Text.Encoding]::ASCII)
         Write-Host "Portable archive: $archive"
     }
 
