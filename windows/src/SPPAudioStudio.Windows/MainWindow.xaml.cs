@@ -20,7 +20,8 @@ namespace SPPAudioStudio.Windows;
 public sealed partial class MainWindow : Window
 {
     private AppWindow? _appWindow;
-    private readonly NavigationView _navigation = new();
+    private readonly Grid _navigation;
+    private readonly ContentControl _pageHost = new();
     private readonly IWorkerService _worker;
     private readonly TaskQueue _tasks = new();
     private readonly List<string> _selectedFiles = [];
@@ -43,11 +44,11 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        _navigation = NavigationRoot;
         _worker = CreateWorker();
         if (_worker is ProcessWorkerService processWorker)
             processWorker.Progress += (_, progress) => DispatcherQueue.TryEnqueue(() => ShowProgress(progress));
         Title = "SPP Audio Studio";
-        SystemBackdrop = new Microsoft.UI.Xaml.Media.MicaBackdrop();
         ConfigureWindow();
         BuildShell();
         _ = RefreshWorkerStatusAsync();
@@ -77,25 +78,23 @@ public sealed partial class MainWindow : Window
 
     private void BuildShell()
     {
-        _navigation.PaneDisplayMode = NavigationViewPaneDisplayMode.Left;
-        _navigation.IsPaneToggleButtonVisible = false;
-        _navigation.IsBackButtonVisible = NavigationViewBackButtonVisible.Collapsed;
-        _navigation.IsSettingsVisible = false;
-        _navigation.IsPaneOpen = true;
-        _navigation.OpenPaneLength = 215;
-        _navigation.CompactPaneLength = 54;
-        _navigation.AlwaysShowHeader = false;
-        _navigation.Background = new SolidColorBrush(ColorHelper.FromArgb(220, 13, 15, 20));
-        _navigation.PaneHeader = BrandHeader();
-
-        _navigation.MenuItems.Add(MenuItem("", "音频工作台", "workbench"));
-        _navigation.MenuItems.Add(MenuItem("", "格式转换", "convert"));
-        _navigation.MenuItems.Add(MenuItem("", "人声分离", "separate"));
-        _navigation.MenuItems.Add(MenuItem("", "声音克隆", "clone"));
-        _navigation.MenuItems.Add(MenuItem("", "模型与环境", "environment"));
-        _navigation.SelectionChanged += NavigationOnSelectionChanged;
-        _navigation.SelectedItem = _navigation.MenuItems[0];
-        Root.Children.Add(_navigation);
+        _navigation.Children.Clear();
+        _navigation.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(215) });
+        _navigation.ColumnDefinitions.Add(new ColumnDefinition());
+        var pane = new StackPanel { Spacing = 6, Padding = new Thickness(12), Background = new SolidColorBrush(ColorHelper.FromArgb(220, 13, 15, 20)) };
+        pane.Children.Add(BrandHeader());
+        foreach (var (text, tag) in new[] { ("音频工作台", "workbench"), ("格式转换", "convert"), ("人声分离", "separate"), ("声音克隆", "clone"), ("模型与环境", "environment") })
+        {
+            var button = new Button { Content = text, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Left, Tag = tag };
+            button.Click += (_, _) => ShowPage(tag);
+            pane.Children.Add(button);
+        }
+        Grid.SetColumn(pane, 0);
+        _navigation.Children.Add(pane);
+        _pageHost.HorizontalAlignment = HorizontalAlignment.Stretch;
+        _pageHost.VerticalAlignment = VerticalAlignment.Stretch;
+        Grid.SetColumn(_pageHost, 1);
+        _navigation.Children.Add(_pageHost);
         ShowPage("workbench");
     }
 
@@ -128,7 +127,7 @@ public sealed partial class MainWindow : Window
 
     private void ShowPage(string tag)
     {
-        _navigation.Content = new ScrollViewer
+        _pageHost.Content = new ScrollViewer
         {
             HorizontalScrollMode = ScrollMode.Disabled,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
@@ -670,12 +669,7 @@ public sealed partial class MainWindow : Window
         if (_engineStatus is not null) _engineStatus.Text = status.IsReady ? "本地引擎就绪" : "环境需检查";
     }
 
-    private void SelectMenu(string tag)
-    {
-        var item = _navigation.MenuItems.OfType<NavigationViewItem>().FirstOrDefault(item => Equals(item.Tag, tag));
-        if (item is not null) _navigation.SelectedItem = item;
-        ShowPage(tag);
-    }
+    private void SelectMenu(string tag) => ShowPage(tag);
 
     private async Task ShowVoiceDialogAsync(StackPanel cards)
     {

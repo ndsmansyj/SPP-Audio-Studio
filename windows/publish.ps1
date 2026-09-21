@@ -24,14 +24,13 @@ New-Item $packageRoot -ItemType Directory -Force | Out-Null
 Push-Location $PSScriptRoot
 try {
     $publishArguments = @(
-        'publish', $appProject,
+        'build', $appProject,
         '--configuration', 'Release',
         '--runtime', $runtime,
-        '--self-contained', 'true',
         '--output', $appOutput,
         "-p:Platform=$Platform",
         '-p:WindowsPackageType=None',
-        '-p:WindowsAppSDKSelfContained=true',
+        '-p:WindowsAppSDKSelfContained=false',
         '-p:PublishSingleFile=false',
         '-p:DebugType=embedded',
         '-p:DebugSymbols=false'
