@@ -1,0 +1,103 @@
+[CmdletBinding()]
+param(
+    [ValidateSet('x64', 'arm64')][string]$Platform = 'x64',
+    [string]$Project,
+    [string]$WorkerEntryPoint,
+    [string]$Version = '0.0.0-dev',
+    [switch]$NoRestore,
+    [switch]$SkipWorker,
+    [switch]$NoArchive
+)
+
+. (Join-Path $PSScriptRoot 'common.ps1')
+Assert-Command 'dotnet' 'Run windows/bootstrap.ps1 -InstallMissing.'
+$appProject = Resolve-AppProject $Project
+$runtime = "win-$Platform"
+$publishRoot = Join-Path $ArtifactsRoot "publish\$runtime"
+$appOutput = Join-Path $publishRoot 'app'
+$workerOutput = Join-Path $publishRoot 'worker'
+$packageRoot = Join-Path $ArtifactsRoot 'packages'
+Reset-Directory $publishRoot
+New-Item $appOutput -ItemType Directory -Force | Out-Null
+New-Item $packageRoot -ItemType Directory -Force | Out-Null
+
+Push-Location $PSScriptRoot
+try {
+    $publishArguments = @(
+        'publish', $appProject,
+        '--configuration', 'Release',
+        '--runtime', $runtime,
+        '--self-contained', 'true',
+        '--output', $appOutput,
+        "-p:Platform=$Platform",
+        '-p:WindowsPackageType=None',
+        '-p:WindowsAppSDKSelfContained=true',
+        '-p:PublishSingleFile=false',
+        '-p:DebugType=embedded',
+        '-p:DebugSymbols=false'
+    )
+    if ($NoRestore) { $publishArguments += '--no-restore' }
+    Invoke-Native 'dotnet' @publishArguments
+
+    if (-not $SkipWorker) {
+        $entryPoint = Resolve-WorkerEntryPoint $WorkerEntryPoint
+        $venvPython = Get-VenvPython
+        $pyInstallerWork = Join-Path $ArtifactsRoot "obj\pyinstaller-$runtime"
+        Reset-Directory $pyInstallerWork
+        New-Item $workerOutput -ItemType Directory -Force | Out-Null
+
+        Invoke-Native $venvPython '-m' 'PyInstaller' '--noconfirm' '--clean' '--onedir' '--name' 'SPPWorker' '--distpath' $workerOutput '--workpath' (Join-Path $pyInstallerWork 'work') '--specpath' $pyInstallerWork $entryPoint
+
+        $workerRoot = Join-Path $PSScriptRoot 'worker'
+        foreach ($name in @('assets', 'config', 'configs')) {
+            $source = Join-Path $workerRoot $name
+            if (Test-Path $source -PathType Container) {
+                Copy-Item $source (Join-Path $workerOutput $name) -Recurse -Force
+            }
+        }
+    }
+
+    $commit = 'unknown'
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        $commitResult = & git -C $RepoRoot rev-parse HEAD 2>$null
+        if ($LASTEXITCODE -eq 0) { $commit = $commitResult.Trim() }
+    }
+
+    $files = @(Get-ChildItem $publishRoot -File -Recurse | Sort-Object FullName)
+    $manifestFiles = @($files | ForEach-Object {
+        $relative = $_.FullName.Substring($publishRoot.Length + 1).Replace('\', '/')
+        $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        [ordered]@{ path = $relative; size = $_.Length; sha256 = $hash }
+    })
+    $releaseManifest = [ordered]@{
+        schemaVersion = 1
+        version = $Version
+        commit = $commit
+        runtimeIdentifier = $runtime
+        portable = $true
+        generatedAtUtc = [DateTime]::UtcNow.ToString('o')
+        files = $manifestFiles
+    }
+    $manifestPath = Join-Path $publishRoot 'release-manifest.json'
+    $releaseManifest | ConvertTo-Json -Depth 6 | Set-Content $manifestPath -Encoding UTF8
+
+    $checksumPath = Join-Path $publishRoot 'SHA256SUMS'
+    $checksumLines = @(Get-ChildItem $publishRoot -File -Recurse | Where-Object Name -ne 'SHA256SUMS' | Sort-Object FullName | ForEach-Object {
+        $relative = $_.FullName.Substring($publishRoot.Length + 1).Replace('\', '/')
+        "{0} *{1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $relative
+    })
+    Set-Content $checksumPath $checksumLines -Encoding ASCII
+
+    if (-not $NoArchive) {
+        $archive = Join-Path $packageRoot "SPPAudioStudio-$Version-$runtime.zip"
+        if (Test-Path $archive) { Remove-Item $archive -Force }
+        Compress-Archive -Path (Join-Path $publishRoot '*') -DestinationPath $archive -CompressionLevel Optimal
+        $archiveHash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+        Set-Content "$archive.sha256" "$archiveHash *$([IO.Path]::GetFileName($archive))" -Encoding ASCII
+        Write-Host "Portable archive: $archive"
+    }
+
+    Write-Host "Publish complete: $publishRoot"
+} finally {
+    Pop-Location
+}

@@ -1,0 +1,3 @@
+# Build-only Python dependency. Worker runtime dependencies belong in
+# windows/worker/requirements.lock (preferred) or requirements.txt.
+pyinstaller==6.16.0

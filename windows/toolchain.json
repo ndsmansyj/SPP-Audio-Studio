@@ -1,0 +1,22 @@
+{
+  "dotnetSdk": "8.0.425",
+  "python": "3.11.9",
+  "runtimeIdentifiers": [
+    "win-x64",
+    "win-arm64"
+  ],
+  "winget": [
+    {
+      "id": "Microsoft.DotNet.SDK.8",
+      "minimumVersion": "8.0.425"
+    },
+    {
+      "id": "Python.Python.3.11",
+      "minimumVersion": "3.11.9"
+    },
+    {
+      "id": "Microsoft.VisualStudio.2022.BuildTools",
+      "minimumVersion": "17.10.0"
+    }
+  ]
+}

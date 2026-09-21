@@ -1,0 +1,86 @@
+from __future__ import annotations
+
+import json
+import pathlib
+import re
+import subprocess
+import unittest
+
+WINDOWS = pathlib.Path(__file__).resolve().parents[1]
+
+
+class WindowsPackagingTests(unittest.TestCase):
+    def test_required_files_exist(self) -> None:
+        required = [
+            "README.md",
+            "bootstrap.ps1",
+            "build.ps1",
+            "publish.ps1",
+            "launch.ps1",
+            "common.ps1",
+            "bootstrap.sh",
+            "build.sh",
+            "publish.sh",
+            "launch.sh",
+            "global.json",
+            "toolchain.json",
+            "requirements-build.txt",
+            "ci/windows.yml",
+        ]
+        missing = [name for name in required if not (WINDOWS / name).is_file()]
+        self.assertEqual([], missing)
+
+    def test_powershell_files_parse(self) -> None:
+        powershell = "powershell.exe"
+        for script in WINDOWS.glob("*.ps1"):
+            command = (
+                "$e=$null; $t=$null; "
+                f"[void][System.Management.Automation.Language.Parser]::ParseFile('{script}',[ref]$t,[ref]$e); "
+                "if($e.Count){$e | ForEach-Object { Write-Error $_ }; exit 1}"
+            )
+            result = subprocess.run(
+                [powershell, "-NoLogo", "-NoProfile", "-Command", command],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, result.returncode, f"{script.name}: {result.stderr}")
+
+    def test_shell_wrappers_are_strict_and_use_cygpath(self) -> None:
+        for script in WINDOWS.glob("*.sh"):
+            text = script.read_text(encoding="utf-8")
+            self.assertIn("set -euo pipefail", text, script.name)
+            self.assertIn("cygpath -w", text, script.name)
+            self.assertIn("powershell.exe", text, script.name)
+
+    def test_toolchain_manifest_is_pinned(self) -> None:
+        manifest = json.loads((WINDOWS / "toolchain.json").read_text(encoding="utf-8"))
+        self.assertRegex(manifest["dotnetSdk"], r"^8\.0\.\d+$")
+        self.assertRegex(manifest["python"], r"^3\.11\.\d+$")
+        for package in manifest["winget"]:
+            self.assertTrue(package["id"])
+            self.assertRegex(package["minimumVersion"], r"^\d+(\.\d+)+$")
+
+    def test_scripts_do_not_embed_checkout_path(self) -> None:
+        forbidden = ["SONGPANPAN", "spp-win-packaging", "D:\\AI\\Hermes"]
+        for path in WINDOWS.rglob("*"):
+            if path.is_file() and path.suffix.lower() in {".ps1", ".sh", ".json", ".yml", ".md", ".txt"}:
+                text = path.read_text(encoding="utf-8")
+                for value in forbidden:
+                    self.assertNotIn(value, text, str(path.relative_to(WINDOWS)))
+
+    def test_publish_generates_checksums_and_manifest(self) -> None:
+        text = (WINDOWS / "publish.ps1").read_text(encoding="utf-8")
+        self.assertIn("SHA256SUMS", text)
+        self.assertIn("release-manifest.json", text)
+        self.assertRegex(text, re.compile(r"Get-FileHash.+SHA256", re.DOTALL))
+
+    def test_powershell_arguments_are_precomposed(self) -> None:
+        for path in WINDOWS.glob("*.ps1"):
+            text = path.read_text(encoding="utf-8")
+            self.assertNotRegex(text, r"'[^'\r\n]*='\s*\+\s*\$", path.name)
+        launch = (WINDOWS / "launch.ps1").read_text(encoding="utf-8")
+        self.assertIn("Start-OptionalArgumentProcess", launch)
+
+
+if __name__ == "__main__":
+    unittest.main()

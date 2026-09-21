@@ -43,3 +43,125 @@ python windows/worker/local_api.py --port 8765 --token <your-secret>
 ```
 
 `GET /v1/status` 和 `POST /v1/convert`、`/v1/separate`、`/v1/clone` 均要求 `Authorization: Bearer <token>`。
+
+## 开发与发布脚本
+
+This directory owns the Windows implementation layout and its build tooling. The scripts are location-independent and work from PowerShell or Git Bash. They expect:
+
+- `windows/src/`: one WinUI 3 .NET 8 `.csproj` (or pass `-Project`).
+- `windows/worker/`: Python worker with `main.py`, `spp_worker.py`, `local_api.py`, or `__main__.py` (or pass `-WorkerEntryPoint`).
+- `windows/worker/requirements.lock`: preferred pinned worker dependencies. `requirements.txt` is accepted with a reproducibility warning.
+
+Generated files stay below `windows/artifacts/` and `windows/.venv/`.
+
+## Prerequisites and bootstrap
+
+Pinned versions are recorded in `toolchain.json` and `global.json`. Visual Studio Build Tools must include the managed desktop build workload and Windows 11 SDK 22621.
+
+PowerShell:
+
+```powershell
+# Check only; does not install or create a virtual environment.
+.\windows\bootstrap.ps1 -CheckOnly
+
+# Install missing SDKs with winget (elevates through the installer if needed).
+.\windows\bootstrap.ps1 -InstallMissing
+
+# Create/update windows/.venv and install packaging + worker dependencies.
+.\windows\bootstrap.ps1
+```
+
+Git Bash:
+
+```bash
+./windows/bootstrap.sh -CheckOnly
+./windows/bootstrap.sh -InstallMissing
+./windows/bootstrap.sh
+```
+
+After `-InstallMissing`, open a new shell before running bootstrap again so Windows refreshes `PATH`.
+
+## Build and test
+
+```powershell
+.\windows\build.ps1
+.\windows\build.ps1 -Configuration Release -Platform x64
+.\windows\build.ps1 -Project C:\path\to\App.csproj -SkipWorker
+```
+
+```bash
+./windows/build.sh -Configuration Release -Platform x64
+```
+
+The build restores and compiles the WinUI project, byte-compiles the worker, runs any `*Tests.csproj`, and runs `windows/worker/tests` with `unittest` when present. Use `-SkipTests`, `-SkipWorker`, or `-NoRestore` only for deliberate incremental work.
+
+## Publish a portable release
+
+```powershell
+.\windows\publish.ps1 -Version 0.3.0 -Platform x64
+```
+
+```bash
+./windows/publish.sh -Version 0.3.0 -Platform x64
+```
+
+The release strategy is **unpackaged, self-contained, portable**:
+
+- WinUI app: .NET self-contained publish plus Windows App SDK self-contained files.
+- Python worker: PyInstaller `--onedir`; no system Python is required on the target machine.
+- Output tree: `windows/artifacts/publish/win-x64/`.
+- Archive: `windows/artifacts/packages/SPPAudioStudio-<version>-win-x64.zip`.
+- Integrity: `release-manifest.json`, `SHA256SUMS`, and an archive `.sha256` file.
+
+This is intentionally not MSIX: portable builds avoid certificate/install requirements and are suitable for CI artifacts and developer previews. Add an MSIX signing pipeline separately when an installer identity and signing certificate are available.
+
+Verify an archive checksum:
+
+```powershell
+Get-FileHash .\windows\artifacts\packages\SPPAudioStudio-0.3.0-win-x64.zip -Algorithm SHA256
+Get-Content .\windows\artifacts\packages\SPPAudioStudio-0.3.0-win-x64.zip.sha256
+```
+
+## Launch
+
+Launch the published app:
+
+```powershell
+.\windows\launch.ps1
+.\windows\launch.ps1 -StartWorker
+```
+
+Development mode uses `dotnet run` and the virtual-environment worker:
+
+```powershell
+.\windows\launch.ps1 -Development -StartWorker
+```
+
+Git Bash equivalents:
+
+```bash
+./windows/launch.sh
+./windows/launch.sh -Development -StartWorker
+```
+
+Pass application or worker arguments with PowerShell arrays, for example:
+
+```powershell
+.\windows\launch.ps1 -StartWorker -AppArguments @('--verbose') -WorkerArguments @('--port','8765')
+```
+
+## CI
+
+`ci/windows.yml` contains the Windows GitHub Actions workflow but lives under `windows/` to keep this branch scoped. Copy it to `.github/workflows/windows.yml` when integrating the Windows branches:
+
+```powershell
+Copy-Item .\windows\ci\windows.yml .\.github\workflows\windows.yml
+```
+
+## Script validation
+
+```powershell
+python -m unittest windows.tests.test_packaging -v
+```
+
+The tests parse every PowerShell script, validate the manifests/wrappers, and check release-integrity generation is present.
