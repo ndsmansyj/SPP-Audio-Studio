@@ -64,6 +64,9 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.call("model-status")[1]["download_source"], "official")
 
     def test_local_api_loopback_auth_and_status(self):
+        environment = patch.dict(os.environ, self.env)
+        environment.start()
+        self.addCleanup(environment.stop)
         import importlib.util
         spec = importlib.util.spec_from_file_location("win_local_api", API)
         module = importlib.util.module_from_spec(spec)
@@ -76,7 +79,9 @@ class WorkerTests(unittest.TestCase):
         self.addCleanup(server.shutdown)
         conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=10)
         conn.request("GET", "/v1/status")
-        self.assertEqual(conn.getresponse().status, 401)
+        unauthorized = conn.getresponse()
+        self.assertEqual(unauthorized.status, 401)
+        unauthorized.read()
         conn.request("GET", "/v1/status", headers={"Authorization": "Bearer secret"})
         response = conn.getresponse()
         self.assertEqual(response.status, 200)
@@ -316,7 +321,13 @@ class WorkerTests(unittest.TestCase):
         binary = site / "imageio_ffmpeg/binaries/ffmpeg-win64-v7.exe"
         binary.parent.mkdir(parents=True)
         binary.write_bytes(b"exe")
-        with patch.object(worker, "QWEN_SITE", site), patch.object(worker.shutil, "which", return_value=None):
+        empty = Path(self.tmp.name) / "empty"
+        with patch.object(worker, "QWEN_SITE", site), \
+             patch.object(worker, "MEL_SITE", empty), \
+             patch.object(worker, "ASR_SITE", empty), \
+             patch.object(worker, "MEL_RUNTIME_DIR", empty), \
+             patch.object(worker, "ASR_RUNTIME_DIR", empty), \
+             patch.object(worker.shutil, "which", return_value=None):
             self.assertEqual(worker.locate_ffmpeg(), binary)
 
     def test_bridge_respects_explicit_ffmpeg_executable(self):
@@ -327,6 +338,16 @@ class WorkerTests(unittest.TestCase):
         with patch.dict(os.environ, {"SPP_FFMPEG": "C:/tools/imageio/ffmpeg-win64.exe"}), \
              patch.object(bridge.shutil, "which", return_value=None):
             self.assertEqual(bridge.find_ffmpeg(), "C:/tools/imageio/ffmpeg-win64.exe")
+
+    def test_run_capture_replaces_undecodable_native_output(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("win_worker_decode", WORKER)
+        worker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(worker)
+        command = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'\\xb2')"]
+        result = worker.run_capture(command)
+        self.assertEqual(result.returncode, 0)
+        self.assertIsInstance(result.stdout, str)
 
 
 if __name__ == "__main__":

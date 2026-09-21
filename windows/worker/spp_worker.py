@@ -132,7 +132,7 @@ def run_capture(cmd: list[str], env: dict | None = None) -> subprocess.Completed
     merged.pop("PYTHONPATH", None)
     if env:
         merged.update(env)
-    return subprocess.run(cmd, capture_output=True, text=True, env=merged)
+    return subprocess.run(cmd, capture_output=True, text=True, errors="replace", env=merged)
 
 
 @contextmanager

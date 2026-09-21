@@ -34,6 +34,9 @@ try {
     $converterProject = Join-Path $PSScriptRoot 'src\FormatConverter\FormatConverter.csproj'
     $converterOutput = Join-Path $PSScriptRoot 'bin'
     New-Item $converterOutput -ItemType Directory -Force | Out-Null
+    if (-not $NoRestore) {
+        Invoke-Native 'dotnet' 'restore' $converterProject
+    }
     Invoke-Native 'dotnet' 'build' $converterProject '--configuration' $Configuration '--no-restore' '--output' $converterOutput
 
     if (-not $SkipWorker) {
@@ -45,15 +48,18 @@ try {
     }
 
     if (-not $SkipTests) {
-        $testProjects = @(Get-ChildItem (Join-Path $PSScriptRoot 'src') -Filter '*Tests.csproj' -File -Recurse)
+        $testsRoot = Join-Path $PSScriptRoot 'tests'
+        $testProjects = @(Get-ChildItem $testsRoot -Filter '*Tests.csproj' -File -Recurse)
         foreach ($testProject in $testProjects) {
+            if (-not $NoRestore) {
+                Invoke-Native 'dotnet' 'restore' $testProject.FullName
+            }
             Invoke-Native 'dotnet' 'test' $testProject.FullName '--configuration' $Configuration '--no-restore' "-p:Platform=$Platform"
         }
 
-        $pythonTests = Join-Path $PSScriptRoot 'worker\tests'
-        if (-not $SkipWorker -and (Test-Path $pythonTests -PathType Container)) {
+        if (-not $SkipWorker -and (Test-Path $testsRoot -PathType Container)) {
             $python = Get-VenvPython
-            Invoke-Native $python '-m' 'unittest' 'discover' '-s' $pythonTests '-v'
+            Invoke-Native $python '-m' 'unittest' 'discover' '-s' $testsRoot '-p' 'test*.py' '-v'
         }
     }
 

@@ -33,7 +33,7 @@ function Get-PythonCommand {
 
 function Invoke-Python {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
-    $command = Get-PythonCommand
+    $command = @(Get-PythonCommand)
     $exe = $command[0]
     $prefix = @()
     if ($command.Count -gt 1) { $prefix = $command[1..($command.Count - 1)] }

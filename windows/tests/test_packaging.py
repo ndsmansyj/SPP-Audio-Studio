@@ -62,17 +62,31 @@ class WindowsPackagingTests(unittest.TestCase):
 
     def test_scripts_do_not_embed_checkout_path(self) -> None:
         forbidden = ["SONGPANPAN", "spp-win-packaging", "D:\\AI\\Hermes"]
+        generated_directories = {"bin", "obj", ".venv", "artifacts", "__pycache__"}
         for path in WINDOWS.rglob("*"):
+            relative = path.relative_to(WINDOWS)
+            if any(part in generated_directories for part in relative.parts):
+                continue
             if path.is_file() and path.suffix.lower() in {".ps1", ".sh", ".json", ".yml", ".md", ".txt"}:
                 text = path.read_text(encoding="utf-8")
                 for value in forbidden:
-                    self.assertNotIn(value, text, str(path.relative_to(WINDOWS)))
+                    self.assertNotIn(value, text, str(relative))
 
     def test_publish_generates_checksums_and_manifest(self) -> None:
         text = (WINDOWS / "publish.ps1").read_text(encoding="utf-8")
         self.assertIn("SHA256SUMS", text)
         self.assertIn("release-manifest.json", text)
         self.assertRegex(text, re.compile(r"Get-FileHash.+SHA256", re.DOTALL))
+
+    def test_build_discovers_the_actual_windows_test_tree(self) -> None:
+        text = (WINDOWS / "build.ps1").read_text(encoding="utf-8")
+        self.assertIn("Join-Path $PSScriptRoot 'tests'", text)
+        self.assertRegex(text, r"unittest'\s+'discover'\s+'-s'\s+\$testsRoot")
+
+    def test_python_command_is_always_wrapped_as_an_array(self) -> None:
+        for name in ("common.ps1", "bootstrap.ps1"):
+            text = (WINDOWS / name).read_text(encoding="utf-8")
+            self.assertNotRegex(text, r"\$pythonCommand\s*=\s*Get-PythonCommand", name)
 
     def test_powershell_arguments_are_precomposed(self) -> None:
         for path in WINDOWS.glob("*.ps1"):

@@ -47,7 +47,7 @@ try {
     }
 
     try {
-        $pythonCommand = Get-PythonCommand
+        $pythonCommand = @(Get-PythonCommand)
         $pythonVersionText = (& $pythonCommand[0] @($pythonCommand | Select-Object -Skip 1) --version 2>&1).ToString().Trim()
         $pythonVersion = $pythonVersionText -replace '^Python\s+', ''
         if ($LASTEXITCODE -ne 0 -or -not $pythonVersion.StartsWith('3.11.') -or -not (Test-VersionAtLeast $pythonVersion $manifest.python)) {
