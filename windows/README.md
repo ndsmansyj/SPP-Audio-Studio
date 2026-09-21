@@ -37,7 +37,9 @@ python windows/worker/spp_worker.py model-download qwen|mel|whisper
 python windows/worker/spp_worker.py voice-list
 ```
 
-模型使用 `.part` 文件断点续传，自动模式优先 `hf-mirror.com`，失败后回退 Hugging Face 官方源。测试不会下载模型。真实 CUDA 就绪状态必须由独立运行时导入、模型加载及短任务 smoke test 决定。
+模型使用 `.part` 文件断点续传，自动模式优先 `hf-mirror.com`，失败后回退 Hugging Face 官方源。Qwen、Whisper 与 Mel 均固定到 `models.json` 中的 40 位 revision；Hugging Face LFS 元数据提供 SHA-256 的大文件会同时校验尺寸和哈希，官方元数据未提供 SHA-256 的普通 Git 文件明确记录为 `null`，只校验尺寸，不伪造哈希。测试不会下载模型。
+
+AI 推理为 CUDA-only：Qwen 使用 SDPA + BF16，Whisper 使用 CTranslate2 CUDA FP16，Mel 在入口检查 CUDA；缺少 CUDA 时直接失败，禁止静默回退 CPU。跨进程 `gpu.lock` 串行化 Qwen/ASR 与 Mel 任务，避免 RTX 4080 16GB 上并发争抢显存。运行时固定为 `qwen-tts==0.1.1`、`faster-whisper==1.2.1`、`ctranslate2==4.8.2`、`audio-separator==0.47.0`。PyTorch 与 torchaudio 固定为 `2.11.0+cu126`；该组合已通过 PyTorch 官方 cu126 index 的 `pip index versions` 验证可用。
 
 本机 API 仅绑定 `127.0.0.1`，需要 Bearer Token：
 

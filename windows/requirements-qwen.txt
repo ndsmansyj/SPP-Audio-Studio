@@ -1,5 +1,6 @@
-# Managed Qwen CUDA backend. Installed by runtime-install qwen with the PyTorch cu128 extra index.
-torch==2.7.1+cu128
-qwen-tts>=0.1,<1
+# Verified available from the PyTorch cu126 index on 2026-09-22.
+torch==2.11.0+cu126
+torchaudio==2.11.0+cu126
+qwen-tts==0.1.1
 soundfile>=0.12
 imageio-ffmpeg>=0.6

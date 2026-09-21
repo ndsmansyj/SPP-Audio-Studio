@@ -32,13 +32,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--top-k", type=int, default=50)
     p.add_argument("--repetition-penalty", type=float, default=1.05)
     return p
+
+
+def require_cuda(torch_module) -> None:
+    if not torch_module.cuda.is_available():
+        raise RuntimeError("CUDA 不可用；AI 推理禁止回退到 CPU")
+
+
 def transcribe(wav_path: Path) -> str:
     if not ASR_PY.is_file() or not ASR_MODEL.exists():
         raise RuntimeError("参考文本为空，但本机没有可用的 Whisper ASR；请填写参考文本。")
     script = (
         "import sys\n"
         "from faster_whisper import WhisperModel\n"
-        "model = WhisperModel(sys.argv[2], device='auto', compute_type='int8')\n"
+        "model = WhisperModel(sys.argv[2], device='cuda', device_index=0, compute_type='float16')\n"
         "segments, _ = model.transcribe(sys.argv[1], language='zh')\n"
         "print(''.join(s.text for s in segments).strip())\n"
     )
@@ -77,6 +84,7 @@ def main() -> int:
     import torch
     from qwen_tts import Qwen3TTSModel
     import soundfile as sf
+    require_cuda(torch)
 
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
@@ -94,10 +102,9 @@ def main() -> int:
             raise RuntimeError("参考音频转换失败：" + (proc.stderr or proc.stdout)[-500:])
 
         ref_text = args.ref_text.strip() or transcribe(wav)
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
         model = Qwen3TTSModel.from_pretrained(
-            str(QWEN_MODEL), device_map=device,
-            dtype=torch.bfloat16 if device.startswith("cuda") else torch.float32,
+            str(QWEN_MODEL), device_map="cuda:0",
+            dtype=torch.bfloat16,
             attn_implementation="sdpa",
         )
         kwargs = dict(

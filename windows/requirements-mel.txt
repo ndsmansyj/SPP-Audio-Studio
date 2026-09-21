@@ -18,6 +18,7 @@ samplerate>=0.1
 scipy>=1.13.0,<2.0.0
 six>=1.16
 soundfile>=0.12
-torch>=2.2,<3
+torch==2.11.0+cu126
+torchaudio==2.11.0+cu126
 tqdm
 imageio-ffmpeg>=0.6

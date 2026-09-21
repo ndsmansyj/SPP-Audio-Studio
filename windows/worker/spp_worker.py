@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import hashlib
 import json
 import os
 import re
@@ -20,6 +22,7 @@ CACHE_DIR = LOCAL_APP_DATA / APP_NAME / "Cache"
 VOICE_DIR = DATA_DIR / "Voices"
 MODEL_DIR = DATA_DIR / "Models"
 RUNTIME_DIR = DATA_DIR / "Runtime"
+GPU_LOCK_FILE = RUNTIME_DIR / "gpu.lock"
 HISTORY_FILE = DATA_DIR / "history.jsonl"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 
@@ -39,8 +42,10 @@ MEL_SITE = MEL_RUNTIME_DIR / "site-packages"
 ASR_RUNTIME_DIR = RUNTIME_DIR / "asr"
 ASR_SITE = ASR_RUNTIME_DIR / "site-packages"
 
-QWEN_RUNTIME_PACKAGES = ["torch==2.7.1+cu128", "qwen-tts>=0.1,<1", "soundfile>=0.12", "imageio-ffmpeg>=0.6"]
-ASR_RUNTIME_PACKAGES = ["faster-whisper>=1.1,<2", "imageio-ffmpeg>=0.6"]
+PYTORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu126"
+PYTORCH_CUDA_PACKAGES = ["torch==2.11.0+cu126", "torchaudio==2.11.0+cu126"]
+QWEN_RUNTIME_PACKAGES = PYTORCH_CUDA_PACKAGES + ["qwen-tts==0.1.1", "soundfile>=0.12", "imageio-ffmpeg>=0.6"]
+ASR_RUNTIME_PACKAGES = ["faster-whisper==1.2.1", "ctranslate2==4.8.2", "imageio-ffmpeg>=0.6"]
 MEL_RUNTIME_PACKAGE = "audio-separator==0.47.0"
 # Mel-Deux uses the MDXC path. diffq is only required by Demucs in audio-separator,
 # so RC6 installs the needed all-wheel dependencies explicitly and skips diffq.
@@ -51,38 +56,44 @@ MEL_RUNTIME_DEPS = [
     "onnx2torch>=1.5", "packaging", "pydub>=0.25", "pyyaml",
     "requests>=2", "resampy>=0.4", "rotary-embedding-torch>=0.6.1,<0.7.0",
     "samplerate>=0.1", "scipy>=1.13.0,<2.0.0", "six>=1.16",
-    "soundfile>=0.12", "torch>=2.2,<3", "tqdm", "imageio-ffmpeg>=0.6",
+    "soundfile>=0.12", *PYTORCH_CUDA_PACKAGES, "tqdm", "imageio-ffmpeg>=0.6",
 ]
 PYPI_OFFICIAL = "https://pypi.org/simple"
 PYPI_MIRROR = "https://pypi.tuna.tsinghua.edu.cn/simple"
 
 QWEN_REPO = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
-QWEN_REVISION = "main"
+QWEN_REVISION = "fd4b254389122332181a7c3db7f27e918eec64e3"
 MEL_REPO = "becruily/mel-band-roformer-deux"
 MEL_REVISION = "2da74427d682a3df47a774378fc24d7a1a0cdaad"
 WHISPER_REPO = "mobiuslabsgmbh/faster-whisper-large-v3-turbo"
-WHISPER_REVISION = "main"
+WHISPER_REVISION = "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf"
 HF_OFFICIAL = "https://huggingface.co"
 HF_MIRROR = "https://hf-mirror.com"
 
 QWEN_FILES = {
-    "config.json": 4494,
-    "generation_config.json": 245,
-    "merges.txt": 1671839,
-    "model.safetensors": 3857413744,
-    "preprocessor_config.json": 127,
-    "speech_tokenizer/config.json": 2336,
-    "speech_tokenizer/configuration.json": 76,
-    "speech_tokenizer/model.safetensors": 682293092,
-    "speech_tokenizer/preprocessor_config.json": 234,
-    "tokenizer_config.json": 7344,
-    "vocab.json": 2776833,
+    "config.json": {"size": 4494, "sha256": None},
+    "generation_config.json": {"size": 245, "sha256": None},
+    "merges.txt": {"size": 1671839, "sha256": None},
+    "model.safetensors": {"size": 3857413744, "sha256": "38fc7fc51c5e776e840414b6fd443962e9411b9654888fd7913e4da643cb857c"},
+    "preprocessor_config.json": {"size": 127, "sha256": None},
+    "speech_tokenizer/config.json": {"size": 2336, "sha256": None},
+    "speech_tokenizer/configuration.json": {"size": 76, "sha256": None},
+    "speech_tokenizer/model.safetensors": {"size": 682293092, "sha256": "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258"},
+    "speech_tokenizer/preprocessor_config.json": {"size": 234, "sha256": None},
+    "tokenizer_config.json": {"size": 7344, "sha256": None},
+    "vocab.json": {"size": 2776833, "sha256": None},
 }
 MEL_FILES = {
-    "becruily_deux.ckpt": 435006815,
-    "config_deux_becruily.yaml": 1175,
+    "becruily_deux.ckpt": {"size": 435006815, "sha256": "10255c02295bf3e3865d4ee50ff752d7b19b124ed5fd93b147babc4333eda3aa"},
+    "config_deux_becruily.yaml": {"size": 1175, "sha256": None},
 }
-WHISPER_FILES = {"config.json": 2263, "model.bin": 1617884929, "preprocessor_config.json": 340, "tokenizer.json": 2710337, "vocabulary.json": 1068114}
+WHISPER_FILES = {
+    "config.json": {"size": 2263, "sha256": None},
+    "model.bin": {"size": 1617884929, "sha256": "e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da"},
+    "preprocessor_config.json": {"size": 340, "sha256": None},
+    "tokenizer.json": {"size": 2710337, "sha256": None},
+    "vocabulary.json": {"size": 1068114, "sha256": None},
+}
 
 
 def ensure_dirs() -> None:
@@ -122,6 +133,35 @@ def run_capture(cmd: list[str], env: dict | None = None) -> subprocess.Completed
     if env:
         merged.update(env)
     return subprocess.run(cmd, capture_output=True, text=True, env=merged)
+
+
+@contextmanager
+def gpu_lock(timeout: float = 3600):
+    """Serialize CUDA jobs across worker processes on Windows."""
+    ensure_dirs()
+    import msvcrt
+    handle = GPU_LOCK_FILE.open("a+b")
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        handle.write(b"0")
+        handle.flush()
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            break
+        except OSError:
+            if time.monotonic() >= deadline:
+                handle.close()
+                raise TimeoutError("等待 CUDA GPU 锁超时")
+            time.sleep(0.1)
+    try:
+        yield
+    finally:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        handle.close()
 
 
 def locate_ffmpeg() -> Path | None:
@@ -219,6 +259,8 @@ def cmd_separate(args: argparse.Namespace) -> int:
     mel_model_dir = Path(env["mel_model_dir"])
     if not env["separator_runtime_installed"]:
         return emit({"ok": False, "error": "Mel Runtime 未安装，请先在“模型与环境”中安装运行环境。"}, 3)
+    if env["separator_source"] == "linked":
+        return emit({"ok": False, "error": "外部 Separator 无法验证 CUDA-only；请安装托管 Mel CUDA Runtime。"}, 3)
 
     out_dir = Path(args.output_dir).expanduser() if args.output_dir else src.parent / "SPP Audio" / src.stem
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -249,7 +291,8 @@ def cmd_separate(args: argparse.Namespace) -> int:
         if ffmpeg:
             mel_path = str(ffmpeg.parent) + os.pathsep + mel_path
         mel_env["PATH"] = mel_path
-        proc = run_capture(cmd, mel_env)
+        with gpu_lock():
+            proc = run_capture(cmd, mel_env)
         if proc.returncode != 0:
             msg = (proc.stderr or proc.stdout or "Mel-Deux 分离失败").strip()
             return emit({"ok": False, "error": msg[-2000:]}, 4)
@@ -307,7 +350,8 @@ def bridge_clone(ref_audio: Path, text: str, ref_text: str, output_dir: Path,
         bridge_env["SPP_FFMPEG"] = str(ffmpeg)
         bridge_env["PATH"] = str(ffmpeg.parent) + os.pathsep + os.environ.get("PATH", "")
 
-    proc = run_capture(cmd, bridge_env)
+    with gpu_lock():
+        proc = run_capture(cmd, bridge_env)
     marker = "RESULT_JSON="
     result_line = next((x for x in reversed(proc.stdout.splitlines()) if x.startswith(marker)), None)
     if proc.returncode != 0 or not result_line:
@@ -458,10 +502,20 @@ def resolve_environment() -> dict:
     }
 
 
-def _model_files_complete(folder: Path, files: dict[str, int]) -> bool:
-    for relpath, expected_size in files.items():
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _model_files_complete(folder: Path, files: dict[str, dict]) -> bool:
+    for relpath, metadata in files.items():
         target = folder / relpath
-        if not target.is_file() or target.stat().st_size != expected_size:
+        if not target.is_file() or target.stat().st_size != metadata["size"]:
+            return False
+        if metadata["sha256"] and _file_sha256(target) != metadata["sha256"]:
             return False
     return True
 
@@ -480,18 +534,21 @@ def cmd_model_status(_: argparse.Namespace) -> int:
         "models": {
             "whisper": {
                 "repo": WHISPER_REPO,
+                "revision": WHISPER_REVISION,
                 "path": str(env["asr_model"]),
                 "source": env["asr_model_source"],
                 "installed": _model_files_complete(Path(env["asr_model"]), WHISPER_FILES),
             },
             "qwen": {
                 "repo": QWEN_REPO,
+                "revision": QWEN_REVISION,
                 "path": str(env["qwen_model"]),
                 "source": env["qwen_model_source"],
                 "installed": _model_files_complete(qwen_model_path, QWEN_FILES),
             },
             "mel_deux": {
                 "repo": MEL_REPO,
+                "revision": MEL_REVISION,
                 "path": str(env["mel_model_dir"]),
                 "source": env["mel_model_source"],
                 "installed": _model_files_complete(mel_model_path, MEL_FILES),
@@ -641,8 +698,8 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
                 "--target", str(site),
                 "--index-url", endpoint,
             ]
-            if kind == "qwen":
-                cmd += ["--extra-index-url", "https://download.pytorch.org/whl/cu128"]
+            if kind in ("qwen", "mel"):
+                cmd += ["--extra-index-url", PYTORCH_CUDA_INDEX]
             if no_deps:
                 cmd.append("--no-deps")
             cmd += step_packages
@@ -662,22 +719,28 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
             continue
 
         if kind == "asr":
-            verify = _verify_python_import(site, "import faster_whisper; print('ASR_RUNTIME_OK')")
+            verify = _verify_python_import(
+                site,
+                "import ctranslate2, faster_whisper; assert ctranslate2.get_cuda_device_count() > 0, 'CUDA unavailable'; print('ASR_RUNTIME_OK')",
+            )
             if verify.returncode != 0:
-                errors.append(f"{endpoint}: ASR import failed: {(verify.stderr or verify.stdout)[-800:]}")
+                errors.append(f"{endpoint}: ASR CUDA verification failed: {(verify.stderr or verify.stdout)[-800:]}")
                 shutil.rmtree(temp_dir, ignore_errors=True)
                 continue
         elif kind == "qwen":
-            verify = _verify_python_import(site, "import qwen_tts, torch; print('QWEN_RUNTIME_OK')")
+            verify = _verify_python_import(
+                site,
+                "import qwen_tts, torch; assert torch.cuda.is_available(), 'CUDA unavailable'; assert torch.cuda.is_bf16_supported(), 'CUDA BF16 unavailable'; print('QWEN_RUNTIME_OK')",
+            )
             if verify.returncode != 0:
-                errors.append(f"{endpoint}: Qwen import failed: {(verify.stderr or verify.stdout)[-800:]}")
+                errors.append(f"{endpoint}: Qwen CUDA verification failed: {(verify.stderr or verify.stdout)[-800:]}")
                 shutil.rmtree(temp_dir, ignore_errors=True)
                 continue
         else:
             _install_mel_registry(site)
             verify = _verify_python_import(
                 site,
-                "from audio_separator.separator import Separator; import onnxruntime, imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())",
+                "from audio_separator.separator import Separator; import imageio_ffmpeg, torch; assert torch.cuda.is_available(), 'CUDA unavailable'; print(imageio_ffmpeg.get_ffmpeg_exe())",
             )
             if verify.returncode != 0:
                 errors.append(f"{endpoint}: Mel import failed: {(verify.stderr or verify.stdout)[-800:]}")
@@ -734,12 +797,15 @@ def _endpoint_order(source: str) -> list[str]:
     return [HF_MIRROR, HF_OFFICIAL]
 
 
-def _download_one(repo: str, revision: str, relpath: str, expected_size: int, target: Path, source: str) -> None:
+def _download_one(repo: str, revision: str, relpath: str, metadata: dict, target: Path, source: str) -> None:
     curl = shutil.which("curl")
     if not curl:
         raise RuntimeError("未找到 curl.exe；请安装 curl 并加入 PATH")
     target.parent.mkdir(parents=True, exist_ok=True)
-    if target.is_file() and target.stat().st_size == expected_size:
+    expected_size = metadata["size"]
+    expected_sha256 = metadata["sha256"]
+    if (target.is_file() and target.stat().st_size == expected_size
+            and (expected_sha256 is None or _file_sha256(target) == expected_sha256)):
         print(json.dumps({
             "event": "skip", "file": relpath, "bytes": expected_size
         }, ensure_ascii=False), flush=True)
@@ -760,6 +826,10 @@ def _download_one(repo: str, revision: str, relpath: str, expected_size: int, ta
         ]
         proc = subprocess.run(cmd)
         if proc.returncode == 0 and part.is_file() and part.stat().st_size == expected_size:
+            if expected_sha256 and _file_sha256(part) != expected_sha256:
+                errors.append(f"{endpoint}: SHA-256 校验失败")
+                part.unlink(missing_ok=True)
+                continue
             part.replace(target)
             print(json.dumps({
                 "event": "download_done", "file": relpath,
@@ -785,13 +855,13 @@ def cmd_model_download(args: argparse.Namespace) -> int:
         target_dir = MODEL_DIR / "Mel-Deux"
 
     try:
-        total = sum(files.values())
+        total = sum(metadata["size"] for metadata in files.values())
         print(json.dumps({
             "event": "model_begin", "model": args.model,
             "repo": repo, "total_bytes": total, "source": source
         }, ensure_ascii=False), flush=True)
-        for relpath, size in files.items():
-            _download_one(repo, revision, relpath, size, target_dir / relpath, source)
+        for relpath, metadata in files.items():
+            _download_one(repo, revision, relpath, metadata, target_dir / relpath, source)
         print(json.dumps({
             "event": "model_done", "model": args.model,
             "path": str(target_dir), "total_bytes": total

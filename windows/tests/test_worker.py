@@ -1,5 +1,6 @@
 """Model-free Windows worker contract tests: python -m unittest discover -s windows/tests -v."""
 import http.client
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -39,6 +40,8 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(set(status["models"]), {"qwen", "mel_deux", "whisper"})
         self.assertEqual(set(status["runtime"]), {"qwen_python", "separator", "asr_python"})
+        self.assertEqual(status["models"]["qwen"]["revision"], "fd4b254389122332181a7c3db7f27e918eec64e3")
+        self.assertEqual(status["models"]["whisper"]["revision"], "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf")
         self.assertFalse(status["models"]["qwen"]["installed"])
         self.assertTrue(status["models"]["qwen"]["path"].endswith("Qwen3-TTS-12Hz-1.7B-Base"))
 
@@ -86,10 +89,17 @@ class WorkerTests(unittest.TestCase):
         worker = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(worker)
         self.assertEqual(worker.QWEN_REPO, "Qwen/Qwen3-TTS-12Hz-1.7B-Base")
-        self.assertIn("qwen-tts", " ".join(worker.QWEN_RUNTIME_PACKAGES))
-        self.assertIn("faster-whisper", " ".join(worker.ASR_RUNTIME_PACKAGES))
+        self.assertIn("qwen-tts==0.1.1", worker.QWEN_RUNTIME_PACKAGES)
+        self.assertIn("torch==2.11.0+cu126", worker.QWEN_RUNTIME_PACKAGES)
+        self.assertIn("torchaudio==2.11.0+cu126", worker.QWEN_RUNTIME_PACKAGES)
+        self.assertIn("faster-whisper==1.2.1", worker.ASR_RUNTIME_PACKAGES)
+        self.assertIn("ctranslate2==4.8.2", worker.ASR_RUNTIME_PACKAGES)
         self.assertNotIn("mlx", " ".join(worker.ASR_RUNTIME_PACKAGES + worker.QWEN_RUNTIME_PACKAGES))
         self.assertIn("model.bin", worker.WHISPER_FILES)
+        self.assertEqual(worker.QWEN_REVISION, "fd4b254389122332181a7c3db7f27e918eec64e3")
+        self.assertEqual(worker.WHISPER_REVISION, "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf")
+        self.assertEqual(worker.QWEN_FILES["model.safetensors"]["sha256"], "38fc7fc51c5e776e840414b6fd443962e9411b9654888fd7913e4da643cb857c")
+        self.assertIsNone(worker.QWEN_FILES["config.json"]["sha256"])
 
     def test_download_resumes_with_discovered_curl_and_falls_back(self):
         import importlib.util
@@ -106,13 +116,30 @@ class WorkerTests(unittest.TestCase):
                 part.write_bytes(b"12345")
             return subprocess.CompletedProcess(cmd, 22 if len(commands) == 1 else 0)
         with patch.object(worker.shutil, "which", return_value="C:/tools/curl.exe"), patch.object(worker.subprocess, "run", side_effect=fake_run):
-            worker._download_one("a/b", "main", "model.bin", 5, target, "mirror")
+            worker._download_one("a/b", "main", "model.bin", {"size": 5, "sha256": None}, target, "mirror")
         self.assertEqual(target.read_bytes(), b"12345")
         self.assertEqual(len(commands), 2)
         self.assertEqual(commands[0][0], "C:/tools/curl.exe")
         self.assertIn("-C", commands[0])
         self.assertIn("hf-mirror.com", commands[0][-1])
         self.assertIn("huggingface.co", commands[1][-1])
+
+    def test_download_rejects_wrong_sha256(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("win_worker_hash", WORKER)
+        worker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(worker)
+        target = Path(self.tmp.name) / "model.bin"
+        part = target.with_suffix(".bin.part")
+        payload = b"12345"
+        def fake_run(cmd, **kwargs):
+            part.write_bytes(payload)
+            return subprocess.CompletedProcess(cmd, 0)
+        expected = hashlib.sha256(b"other").hexdigest()
+        with patch.object(worker.shutil, "which", return_value="C:/tools/curl.exe"), patch.object(worker.subprocess, "run", side_effect=fake_run):
+            with self.assertRaisesRegex(RuntimeError, "SHA-256"):
+                worker._download_one("a/b", "rev", "model.bin", {"size": len(payload), "sha256": expected}, target, "official")
+        self.assertFalse(target.exists())
 
     def test_runtime_detection_uses_qwen_tts_and_faster_whisper(self):
         import importlib.util
@@ -154,6 +181,20 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(capture["PATH"].split(os.pathsep)[0], "C:\\tools")
         self.assertIn(os.environ["PATH"], capture["PATH"])
 
+    def test_separator_rejects_unverifiable_linked_runtime(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("win_worker_linked_sep", WORKER)
+        worker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(worker)
+        src = Path(self.tmp.name) / "song.wav"
+        src.write_bytes(b"RIFF")
+        args = worker.build_parser().parse_args(["separate", str(src), "--format", "WAV"])
+        with patch.object(worker, "CACHE_DIR", Path(self.tmp.name)), \
+             patch.object(worker, "resolve_environment", return_value={"mel_model_dir": self.tmp.name, "separator_runtime_installed": True, "separator_source": "linked", "separator_bin": "C:/tools/audio-separator.exe"}):
+            with patch("builtins.print") as output:
+                self.assertEqual(worker.cmd_separate(args), 3)
+        self.assertIn("CUDA", output.call_args.args[0])
+
     def test_runtime_install_verifies_windows_imports_without_unix_pip_flags(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location("win_worker_install", WORKER)
@@ -175,8 +216,20 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(any("qwen_tts" in " ".join(c) for c in commands))
         self.assertFalse(any("mlx" in " ".join(c) for c in commands))
         self.assertFalse(any("--break-system-packages" in c for c in commands))
-        self.assertTrue(any("https://download.pytorch.org/whl/cu128" in c for c in commands))
-        self.assertIn("torch==2.7.1+cu128", " ".join(commands[0]))
+        self.assertTrue(any("https://download.pytorch.org/whl/cu126" in c for c in commands))
+        self.assertIn("torch==2.11.0+cu126", " ".join(commands[0]))
+        self.assertTrue(any("torch.cuda.is_available" in " ".join(c) for c in commands))
+
+    def test_manifest_marks_unavailable_hashes_unknown(self):
+        manifest = json.loads((ROOT / "models.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["schema_version"], 2)
+        self.assertIsNone(manifest["qwen"]["files"]["config.json"]["sha256"])
+        for model in ("qwen", "mel", "whisper"):
+            self.assertRegex(manifest[model]["revision"], r"^[0-9a-f]{40}$")
+            for metadata in manifest[model]["files"].values():
+                self.assertGreater(metadata["size"], 0)
+                if metadata["sha256"] is not None:
+                    self.assertRegex(metadata["sha256"], r"^[0-9a-f]{64}$")
 
     def test_qwen_bridge_uses_official_pytorch_clone_api(self):
         import importlib.util
@@ -211,7 +264,19 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(bridge.main(), 0)
         self.assertEqual(generated[0]["language"], "Chinese")
         self.assertEqual(generated[0]["ref_text"], "你好")
+        self.assertEqual(generated[0]["ref_audio"].endswith("reference.wav"), True)
         self.assertEqual(generated[0]["top_k"], 50)
+
+    def test_qwen_bridge_refuses_cpu_fallback(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("win_qwen_gate", ROOT / "worker/qwen_bridge.py")
+        bridge = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bridge)
+        torch = ModuleType("torch")
+        torch.cuda = type("Cuda", (), {"is_available": staticmethod(lambda: False)})()
+        with patch.dict(sys.modules, {"torch": torch}):
+            with self.assertRaisesRegex(RuntimeError, "CUDA"):
+                bridge.require_cuda(torch)
 
     def test_optional_asr_uses_ctranslate2_faster_whisper(self):
         import importlib.util
@@ -229,7 +294,18 @@ class WorkerTests(unittest.TestCase):
              patch.object(bridge.subprocess, "run", side_effect=fake_run):
             self.assertEqual(bridge.transcribe(Path(self.tmp.name) / "ref.wav"), "转写结果")
         self.assertIn("faster_whisper", commands[0][2])
+        self.assertIn("device='cuda'", commands[0][2])
+        self.assertIn("compute_type='float16'", commands[0][2])
         self.assertNotIn("mlx", commands[0][2])
+
+    def test_gpu_jobs_use_cross_process_lock(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("win_worker_lock", WORKER)
+        worker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(worker)
+        self.assertTrue(worker.GPU_LOCK_FILE.name.endswith("gpu.lock"))
+        with worker.gpu_lock(timeout=1):
+            self.assertTrue(worker.GPU_LOCK_FILE.is_file())
 
     def test_locate_ffmpeg_uses_managed_qwen_imageio_binary(self):
         import importlib.util
