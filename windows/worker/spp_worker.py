@@ -379,9 +379,16 @@ def bridge_clone(ref_audio: Path, text: str, ref_text: str, output_dir: Path,
     if ref_text:
         bridge_args += ["--ref-text", ref_text]
 
-    cmd = (_managed_command("qwen", bridge_args)
-           if env_cfg["qwen_python_source"] == "managed"
-           else [str(qwen_python), str(BRIDGE), *bridge_args])
+    if env_cfg["qwen_python_source"] == "managed":
+        if IS_FROZEN:
+            host_python = shutil.which("python.exe") or shutil.which("python")
+            host_bridge = PYTHON_CORE.parent.parent / "qwen_bridge.py"
+            cmd = ([host_python, str(host_bridge if host_bridge.is_file() else BRIDGE), *bridge_args]
+                   if host_python else _managed_command("qwen", bridge_args))
+        else:
+            cmd = _managed_command("qwen", bridge_args)
+    else:
+        cmd = [str(qwen_python), str(BRIDGE), *bridge_args]
 
     bridge_env = {
         "SPP_QWEN_MODEL": str(qwen_model),

@@ -34,6 +34,7 @@ try {
         '/p:WindowsPackageType=None',
         '-p:WindowsAppSDKSelfContained=true',
         '/p:SelfContained=true',
+        '/p:PublishTrimmed=false',
         '/p:PublishSingleFile=false',
         '/p:DebugType=embedded',
         '/p:DebugSymbols=false'
@@ -53,13 +54,19 @@ try {
         Reset-Directory $pyInstallerWork
         New-Item $workerOutput -ItemType Directory -Force | Out-Null
 
-        Invoke-Native $venvPython '-m' 'PyInstaller' '--noconfirm' '--clean' '--onedir' '--name' 'SPPWorker' '--collect-all' 'pip' '--hidden-import' 'qwen_bridge' '--hidden-import' 'mel_bridge' '--distpath' $workerOutput '--workpath' (Join-Path $pyInstallerWork 'work') '--specpath' $pyInstallerWork $entryPoint
+        Invoke-Native $venvPython '-m' 'PyInstaller' '--noconfirm' '--clean' '--onedir' '--name' 'SPPWorker' '--collect-all' 'pip' '--hidden-import' 'qwen_bridge' '--hidden-import' 'mel_bridge' '--hidden-import' 'timeit' '--hidden-import' 'pickletools' '--distpath' $workerOutput '--workpath' (Join-Path $pyInstallerWork 'work') '--specpath' $pyInstallerWork $entryPoint
 
         $workerRoot = Join-Path $PSScriptRoot 'worker'
         foreach ($name in @('assets', 'config', 'configs')) {
             $source = Join-Path $workerRoot $name
             if (Test-Path $source -PathType Container) {
                 Copy-Item $source (Join-Path $workerOutput $name) -Recurse -Force
+            }
+        }
+        foreach ($name in @('qwen_bridge.py', 'mel_bridge.py')) {
+            $source = Join-Path $workerRoot $name
+            if (Test-Path $source -PathType Leaf) {
+                Copy-Item $source (Join-Path $workerOutput $name) -Force
             }
         }
     }

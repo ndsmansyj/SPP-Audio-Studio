@@ -19,6 +19,28 @@ ASR_SITE = os.environ.get("SPP_ASR_SITE", "")
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 ASR_WORKER_REEXEC = IS_FROZEN and os.environ.get("SPP_ASR_WORKER_REEXEC") == "1"
 
+
+def add_managed_dll_directories() -> None:
+    """Make DLLs from the external managed runtime visible to frozen workers."""
+    if not IS_FROZEN or not os.environ.get("PYTHONPATH"):
+        return
+    site = Path(os.environ["PYTHONPATH"])
+    if not site.is_dir() or not hasattr(os, "add_dll_directory"):
+        return
+    directories = {p.parent for p in site.rglob("*.dll")}
+    global _DLL_HANDLES
+    _DLL_HANDLES = []
+    os.environ["PATH"] = os.pathsep.join([str(p) for p in sorted(directories)] + [os.environ.get("PATH", "")])
+    for directory in sorted(directories):
+        try:
+            _DLL_HANDLES.append(os.add_dll_directory(str(directory)))
+        except OSError:
+            pass
+
+
+_DLL_HANDLES: list[object] = []
+add_managed_dll_directories()
+
 def find_ffmpeg() -> str | None:
     return os.environ.get("SPP_FFMPEG") or shutil.which("ffmpeg")
 
