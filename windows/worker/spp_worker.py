@@ -26,7 +26,18 @@ GPU_LOCK_FILE = RUNTIME_DIR / "gpu.lock"
 HISTORY_FILE = DATA_DIR / "history.jsonl"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 
-BUNDLED_FORMAT_BIN = Path(__file__).resolve().parent.parent / "bin" / "format_converter.exe"
+IS_FROZEN = bool(getattr(sys, "frozen", False))
+
+
+def _bundled_format_binary() -> Path:
+    # publish.ps1 places converter at worker/bin and the onedir EXE at
+    # worker/SPPWorker/SPPWorker.exe, matching WorkerLocator's release layout.
+    root = PYTHON_CORE.parent.parent if IS_FROZEN else Path(__file__).resolve().parent.parent
+    return root / "bin" / "format_converter.exe"
+
+
+PYTHON_CORE = Path(sys.executable if IS_FROZEN else os.environ.get("SPP_PYTHON_CORE", sys.executable)).expanduser()
+BUNDLED_FORMAT_BIN = _bundled_format_binary()
 FORMAT_BIN = Path(os.environ.get("SPP_FORMAT_BIN", str(BUNDLED_FORMAT_BIN))).expanduser()
 MEL_MODEL = os.environ.get("SPP_MEL_MODEL", "becruily_deux.ckpt")
 MEL_REGISTRY_NAME = "Roformer Model: Mel-Band RoFormer Deux by becruily"
@@ -34,7 +45,6 @@ MEL_CONFIG = "config_deux_becruily.yaml"
 BRIDGE = Path(__file__).with_name("qwen_bridge.py")
 MEL_BRIDGE = Path(__file__).with_name("mel_bridge.py")
 DEFAULT_VOICE_DIR = Path(os.environ.get("SPP_DEFAULT_VOICE_DIR", "")).expanduser()
-PYTHON_CORE = Path(os.environ.get("SPP_PYTHON_CORE", sys.executable)).expanduser()
 QWEN_RUNTIME_DIR = RUNTIME_DIR / "qwen"
 QWEN_SITE = QWEN_RUNTIME_DIR / "site-packages"
 MEL_RUNTIME_DIR = RUNTIME_DIR / "mel"
@@ -135,6 +145,41 @@ def run_capture(cmd: list[str], env: dict | None = None) -> subprocess.Completed
     return subprocess.run(cmd, capture_output=True, text=True, errors="replace", env=merged)
 
 
+def _managed_command(kind: str, args: list[str]) -> list[str]:
+    """Run managed AI code in a fresh interpreter, including when frozen."""
+    if IS_FROZEN:
+        return [str(PYTHON_CORE), f"_{kind}-bridge", *args]
+    script = {"qwen": BRIDGE, "mel": MEL_BRIDGE}[kind]
+    return [str(PYTHON_CORE), str(script), *args]
+
+
+def _managed_bridge_available(kind: str) -> bool:
+    if IS_FROZEN:
+        return True
+    return {"qwen": BRIDGE, "mel": MEL_BRIDGE}[kind].is_file()
+
+
+def _pip_command(args: list[str]) -> list[str]:
+    if IS_FROZEN:
+        return [str(PYTHON_CORE), "_pip", *args]
+    return [str(PYTHON_CORE), "-m", "pip", *args]
+
+
+def _verification_script(kind: str) -> str:
+    scripts = {
+        "asr": "import ctranslate2, faster_whisper; assert ctranslate2.get_cuda_device_count() > 0, 'CUDA unavailable'; print('ASR_RUNTIME_OK')",
+        "qwen": "import qwen_tts, torch; assert torch.cuda.is_available(), 'CUDA unavailable'; assert torch.cuda.is_bf16_supported(), 'CUDA BF16 unavailable'; print('QWEN_RUNTIME_OK')",
+        "mel": "from audio_separator.separator import Separator; import imageio_ffmpeg, torch; assert torch.cuda.is_available(), 'CUDA unavailable'; print(imageio_ffmpeg.get_ffmpeg_exe())",
+    }
+    return scripts[kind]
+
+
+def _verify_command(kind: str, site: Path) -> list[str]:
+    if IS_FROZEN:
+        return [str(PYTHON_CORE), "_verify-runtime", kind, str(site)]
+    return [str(PYTHON_CORE), "-c", _verification_script(kind)]
+
+
 @contextmanager
 def gpu_lock(timeout: float = 3600):
     """Serialize CUDA jobs across worker processes on Windows."""
@@ -192,7 +237,7 @@ def cmd_doctor(_: argparse.Namespace) -> int:
         "format_converter_binary": FORMAT_BIN.is_file() and os.access(FORMAT_BIN, os.X_OK),
         "qwen_runtime": bool(env["qwen_runtime_installed"]),
         "qwen_model": _model_files_complete(qwen_model, QWEN_FILES),
-        "qwen_bridge": BRIDGE.is_file(),
+        "qwen_bridge": _managed_bridge_available("qwen"),
         "mel_runtime": bool(env["separator_runtime_installed"]),
         "mel_model": _model_files_complete(mel_model_dir, MEL_FILES),
         "mel_config": (mel_model_dir / "config_deux_becruily.yaml").is_file(),
@@ -281,7 +326,7 @@ def cmd_separate(args: argparse.Namespace) -> int:
     if env["separator_source"] == "linked":
         cmd = [str(env["separator_bin"])] + base_args
     else:
-        cmd = [str(PYTHON_CORE), str(MEL_BRIDGE)] + base_args
+        cmd = _managed_command("mel", base_args)
         mel_env["PYTHONPATH"] = str(env["mel_site"])
         mel_env["PYTHONNOUSERSITE"] = "1"
 
@@ -325,21 +370,25 @@ def bridge_clone(ref_audio: Path, text: str, ref_text: str, output_dir: Path,
         raise RuntimeError(f"Qwen 模型不存在：{qwen_model}")
 
     qwen_python = Path(env_cfg["qwen_python"])
-    cmd = [
-        str(qwen_python), str(BRIDGE),
+    bridge_args = [
         "--ref-audio", str(ref_audio), "--text", text,
         "--output-dir", str(output_dir),
         "--temperature", str(temperature), "--top-p", str(top_p),
         "--top-k", str(top_k), "--repetition-penalty", str(repetition_penalty),
     ]
     if ref_text:
-        cmd += ["--ref-text", ref_text]
+        bridge_args += ["--ref-text", ref_text]
+
+    cmd = (_managed_command("qwen", bridge_args)
+           if env_cfg["qwen_python_source"] == "managed"
+           else [str(qwen_python), str(BRIDGE), *bridge_args])
 
     bridge_env = {
         "SPP_QWEN_MODEL": str(qwen_model),
         "SPP_ASR_PY": str(env_cfg["asr_python"]),
         "SPP_ASR_MODEL": str(env_cfg["asr_model"]),
         "SPP_ASR_SITE": str(env_cfg["asr_site"] if env_cfg["asr_python_source"] == "managed" else ""),
+        "SPP_ASR_WORKER_REEXEC": "1" if IS_FROZEN and env_cfg["asr_python_source"] == "managed" else "0",
         "PYTHONNOUSERSITE": "1",
     }
     if env_cfg["qwen_python_source"] == "managed":
@@ -450,7 +499,7 @@ def resolve_environment() -> dict:
         and (MEL_SITE / "audio_separator").exists()
         and (MEL_SITE / "onnxruntime").exists()
         and _mel_registry_ready(MEL_SITE)
-        and MEL_BRIDGE.is_file()
+        and _managed_bridge_available("mel")
         and PYTHON_CORE.is_file()
     )
     if separator_link and separator_link.is_file():
@@ -617,9 +666,9 @@ def _pypi_endpoint_order(source: str) -> list[str]:
     return [PYPI_MIRROR, PYPI_OFFICIAL]
 
 
-def _verify_python_import(site: Path, imports: str) -> subprocess.CompletedProcess:
+def _verify_python_import(kind: str, site: Path) -> subprocess.CompletedProcess:
     return run_capture(
-        [str(PYTHON_CORE), "-c", imports],
+        _verify_command(kind, site),
         {
             "PYTHONPATH": str(site),
             "PYTHONNOUSERSITE": "1",
@@ -690,14 +739,14 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
 
         install_failed = False
         for step_packages, no_deps in install_steps:
-            cmd = [
-                str(PYTHON_CORE), "-m", "pip", "install",
+            cmd = _pip_command([
+                "install",
                 "--disable-pip-version-check",
                 "--no-input",
                 "--only-binary=:all:",
                 "--target", str(site),
                 "--index-url", endpoint,
-            ]
+            ])
             if kind in ("qwen", "mel"):
                 cmd += ["--extra-index-url", PYTORCH_CUDA_INDEX]
             if no_deps:
@@ -720,8 +769,7 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
 
         if kind == "asr":
             verify = _verify_python_import(
-                site,
-                "import ctranslate2, faster_whisper; assert ctranslate2.get_cuda_device_count() > 0, 'CUDA unavailable'; print('ASR_RUNTIME_OK')",
+                "asr", site,
             )
             if verify.returncode != 0:
                 errors.append(f"{endpoint}: ASR CUDA verification failed: {(verify.stderr or verify.stdout)[-800:]}")
@@ -729,8 +777,7 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
                 continue
         elif kind == "qwen":
             verify = _verify_python_import(
-                site,
-                "import qwen_tts, torch; assert torch.cuda.is_available(), 'CUDA unavailable'; assert torch.cuda.is_bf16_supported(), 'CUDA BF16 unavailable'; print('QWEN_RUNTIME_OK')",
+                "qwen", site,
             )
             if verify.returncode != 0:
                 errors.append(f"{endpoint}: Qwen CUDA verification failed: {(verify.stderr or verify.stdout)[-800:]}")
@@ -739,8 +786,7 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         else:
             _install_mel_registry(site)
             verify = _verify_python_import(
-                site,
-                "from audio_separator.separator import Separator; import imageio_ffmpeg, torch; assert torch.cuda.is_available(), 'CUDA unavailable'; print(imageio_ffmpeg.get_ffmpeg_exe())",
+                "mel", site,
             )
             if verify.returncode != 0:
                 errors.append(f"{endpoint}: Mel import failed: {(verify.stderr or verify.stdout)[-800:]}")
@@ -1082,9 +1128,51 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     ensure_dirs()
+    if len(sys.argv) > 1 and sys.argv[1].startswith("_"):
+        return _run_hidden_command(sys.argv[1], sys.argv[2:])
     parser = build_parser()
     args = parser.parse_args()
     return int(args.func(args))
+
+
+def _prepend_site(site: str | Path) -> None:
+    value = str(site)
+    if value and value not in sys.path:
+        sys.path.insert(0, value)
+
+
+def _run_hidden_command(command: str, args: list[str]) -> int:
+    """Entrypoints used when SPPWorker.exe must act as its Python runtime."""
+    if command == "_pip":
+        from pip._internal.cli.main import main as pip_main
+        return int(pip_main(args))
+    if command == "_verify-runtime":
+        if len(args) != 2 or args[0] not in {"qwen", "mel", "asr"}:
+            raise SystemExit("usage: _verify-runtime qwen|mel|asr SITE_PACKAGES")
+        _prepend_site(args[1])
+        exec(_verification_script(args[0]), {"__name__": "__main__"})
+        return 0
+    if command == "_asr-transcribe":
+        if len(args) != 3:
+            raise SystemExit("usage: _asr-transcribe AUDIO MODEL SITE_PACKAGES")
+        wav_path, model_path, site = args
+        _prepend_site(site)
+        from faster_whisper import WhisperModel
+        model = WhisperModel(model_path, device="cuda", device_index=0, compute_type="float16")
+        segments, _ = model.transcribe(wav_path, language="zh")
+        print("".join(segment.text for segment in segments).strip())
+        return 0
+    if command == "_qwen-bridge":
+        _prepend_site(QWEN_SITE)
+        import qwen_bridge
+        sys.argv = ["qwen_bridge.py", *args]
+        return int(qwen_bridge.main())
+    if command == "_mel-bridge":
+        _prepend_site(MEL_SITE)
+        import mel_bridge
+        sys.argv = ["mel_bridge.py", *args]
+        return int(mel_bridge.main())
+    raise SystemExit(f"unknown internal command: {command}")
 
 
 if __name__ == "__main__":

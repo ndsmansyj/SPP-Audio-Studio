@@ -93,6 +93,12 @@ class WindowsPackagingTests(unittest.TestCase):
             text = (WINDOWS / name).read_text(encoding="utf-8")
             self.assertNotRegex(text, r"\$pythonCommand\s*=\s*Get-PythonCommand", name)
 
+    def test_worker_bundle_includes_pip_for_frozen_runtime_install(self) -> None:
+        text = (WINDOWS / "publish.ps1").read_text(encoding="utf-8")
+        self.assertRegex(text, r"--collect-all['\"],?\s*['\"]pip")
+        self.assertRegex(text, r"--hidden-import['\"],?\s*['\"]qwen_bridge")
+        self.assertRegex(text, r"--hidden-import['\"],?\s*['\"]mel_bridge")
+
     def test_powershell_arguments_are_precomposed(self) -> None:
         for path in WINDOWS.glob("*.ps1"):
             text = path.read_text(encoding="utf-8")

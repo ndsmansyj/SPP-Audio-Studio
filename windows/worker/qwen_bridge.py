@@ -16,6 +16,8 @@ QWEN_MODEL = Path(os.environ.get("SPP_QWEN_MODEL", "")).expanduser()
 ASR_PY = Path(os.environ.get("SPP_ASR_PY", "")).expanduser()
 ASR_MODEL = Path(os.environ.get("SPP_ASR_MODEL", "")).expanduser()
 ASR_SITE = os.environ.get("SPP_ASR_SITE", "")
+IS_FROZEN = bool(getattr(sys, "frozen", False))
+ASR_WORKER_REEXEC = IS_FROZEN and os.environ.get("SPP_ASR_WORKER_REEXEC") == "1"
 
 def find_ffmpeg() -> str | None:
     return os.environ.get("SPP_FFMPEG") or shutil.which("ffmpeg")
@@ -53,8 +55,11 @@ def transcribe(wav_path: Path) -> str:
     env.pop("PYTHONPATH", None)
     if ASR_SITE:
         env["PYTHONPATH"] = ASR_SITE
+    command = ([str(ASR_PY), "_asr-transcribe", str(wav_path), str(ASR_MODEL), ASR_SITE]
+               if ASR_WORKER_REEXEC else
+               [str(ASR_PY), "-c", script, str(wav_path), str(ASR_MODEL)])
     proc = subprocess.run(
-        [str(ASR_PY), "-c", script, str(wav_path), str(ASR_MODEL)],
+        command,
         capture_output=True, text=True, env=env, timeout=300
     )
     if proc.returncode != 0:

@@ -71,6 +71,8 @@ class WorkerTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("win_local_api", API)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        module.PYTHON = Path(sys.executable)
+        module.run_worker = lambda args: {"ok": True, "args": args}
         from http.server import ThreadingHTTPServer
         server = ThreadingHTTPServer(("127.0.0.1", 0), module.handler_factory("secret"))
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -82,6 +84,8 @@ class WorkerTests(unittest.TestCase):
         unauthorized = conn.getresponse()
         self.assertEqual(unauthorized.status, 401)
         unauthorized.read()
+        conn.close()
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=10)
         conn.request("GET", "/v1/status", headers={"Authorization": "Bearer secret"})
         response = conn.getresponse()
         self.assertEqual(response.status, 200)
@@ -224,6 +228,106 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(any("https://download.pytorch.org/whl/cu126" in c for c in commands))
         self.assertIn("torch==2.11.0+cu126", " ".join(commands[0]))
         self.assertTrue(any("torch.cuda.is_available" in " ".join(c) for c in commands))
+
+    def test_frozen_worker_reexecutes_hidden_commands_instead_of_python_flags(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("win_worker_frozen_commands", WORKER)
+        worker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(worker)
+        exe = Path("C:/release/SPPWorker.exe")
+        with patch.object(worker, "IS_FROZEN", True), \
+             patch.object(worker, "PYTHON_CORE", exe):
+            self.assertEqual(
+                worker._managed_command("qwen", ["--text", "hello"]),
+                [str(exe), "_qwen-bridge", "--text", "hello"],
+            )
+            self.assertEqual(
+                worker._managed_command("mel", ["--output_dir", "out"]),
+                [str(exe), "_mel-bridge", "--output_dir", "out"],
+            )
+            self.assertEqual(
+                worker._pip_command(["install", "demo"]),
+                [str(exe), "_pip", "install", "demo"],
+            )
+            self.assertEqual(
+                worker._verify_command("asr", Path("C:/runtime/asr/site-packages")),
+                [str(exe), "_verify-runtime", "asr", str(Path("C:/runtime/asr/site-packages"))],
+            )
+            self.assertTrue(worker._managed_bridge_available("qwen"))
+            self.assertTrue(worker._managed_bridge_available("mel"))
+            self.assertEqual(
+                worker._bundled_format_binary(),
+                exe.parent.parent / "bin" / "format_converter.exe",
+            )
+
+    def test_development_worker_keeps_normal_python_execution(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("win_worker_dev_commands", WORKER)
+        worker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(worker)
+        python = Path(sys.executable)
+        with patch.object(worker, "IS_FROZEN", False), \
+             patch.object(worker, "PYTHON_CORE", python):
+            self.assertEqual(worker._managed_command("qwen", ["--text", "hello"]),
+                             [str(python), str(worker.BRIDGE), "--text", "hello"])
+            self.assertEqual(worker._managed_command("mel", ["--output_dir", "out"]),
+                             [str(python), str(worker.MEL_BRIDGE), "--output_dir", "out"])
+            self.assertEqual(worker._pip_command(["install", "demo"]),
+                             [str(python), "-m", "pip", "install", "demo"])
+            verify = worker._verify_command("qwen", Path("C:/runtime/qwen/site-packages"))
+            self.assertEqual(verify[:2], [str(python), "-c"])
+            self.assertIn("qwen_tts", verify[2])
+
+    def test_frozen_worker_ignores_external_python_core_override(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("win_worker_frozen_core", WORKER)
+        worker = importlib.util.module_from_spec(spec)
+        with patch.object(sys, "frozen", True, create=True), \
+             patch.dict(os.environ, {"SPP_PYTHON_CORE": "C:/wrong/python.exe"}):
+            spec.loader.exec_module(worker)
+        self.assertEqual(worker.PYTHON_CORE, Path(sys.executable))
+
+    def test_qwen_bridge_uses_worker_subcommand_for_frozen_asr(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("win_qwen_frozen_asr", ROOT / "worker/qwen_bridge.py")
+        bridge = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bridge)
+        worker_exe = Path(self.tmp.name) / "SPPWorker.exe"
+        worker_exe.write_bytes(b"exe")
+        model = Path(self.tmp.name) / "asr"
+        model.mkdir()
+        commands = []
+        def fake_run(cmd, **kwargs):
+            commands.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "转写结果\n", "")
+        with patch.object(bridge, "ASR_PY", worker_exe), \
+             patch.object(bridge, "ASR_MODEL", model), \
+             patch.object(bridge, "ASR_WORKER_REEXEC", True), \
+             patch.object(bridge.subprocess, "run", side_effect=fake_run):
+            self.assertEqual(bridge.transcribe(Path(self.tmp.name) / "ref.wav"), "转写结果")
+        self.assertEqual(commands[0][:2], [str(worker_exe), "_asr-transcribe"])
+        self.assertNotIn("-c", commands[0])
+
+    def test_qwen_bridge_keeps_linked_asr_python_execution_when_frozen(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("win_qwen_linked_asr", ROOT / "worker/qwen_bridge.py")
+        bridge = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bridge)
+        python = Path(self.tmp.name) / "python.exe"
+        python.write_bytes(b"exe")
+        model = Path(self.tmp.name) / "asr"
+        model.mkdir()
+        commands = []
+        def fake_run(cmd, **kwargs):
+            commands.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "linked result\n", "")
+        with patch.object(bridge, "ASR_PY", python), \
+             patch.object(bridge, "ASR_MODEL", model), \
+             patch.object(bridge, "IS_FROZEN", True), \
+             patch.object(bridge, "ASR_WORKER_REEXEC", False), \
+             patch.object(bridge.subprocess, "run", side_effect=fake_run):
+            self.assertEqual(bridge.transcribe(Path(self.tmp.name) / "ref.wav"), "linked result")
+        self.assertEqual(commands[0][:2], [str(python), "-c"])
 
     def test_manifest_marks_unavailable_hashes_unknown(self):
         manifest = json.loads((ROOT / "models.json").read_text(encoding="utf-8"))

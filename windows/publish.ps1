@@ -50,7 +50,7 @@ try {
         Reset-Directory $pyInstallerWork
         New-Item $workerOutput -ItemType Directory -Force | Out-Null
 
-        Invoke-Native $venvPython '-m' 'PyInstaller' '--noconfirm' '--clean' '--onedir' '--name' 'SPPWorker' '--distpath' $workerOutput '--workpath' (Join-Path $pyInstallerWork 'work') '--specpath' $pyInstallerWork $entryPoint
+        Invoke-Native $venvPython '-m' 'PyInstaller' '--noconfirm' '--clean' '--onedir' '--name' 'SPPWorker' '--collect-all' 'pip' '--hidden-import' 'qwen_bridge' '--hidden-import' 'mel_bridge' '--distpath' $workerOutput '--workpath' (Join-Path $pyInstallerWork 'work') '--specpath' $pyInstallerWork $entryPoint
 
         $workerRoot = Join-Path $PSScriptRoot 'worker'
         foreach ($name in @('assets', 'config', 'configs')) {
