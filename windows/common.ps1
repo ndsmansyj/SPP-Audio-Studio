@@ -9,6 +9,38 @@ function Get-ToolchainManifest {
     Get-Content (Join-Path $script:WindowsRoot 'toolchain.json') -Raw | ConvertFrom-Json
 }
 
+function Get-VsWherePath {
+    $candidate = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (Test-Path $candidate -PathType Leaf) { return $candidate }
+    return $null
+}
+
+function Get-VsInstallationPath {
+    param([switch]$RequireUniversalBuildTools)
+    $vswhere = Get-VsWherePath
+    if (-not $vswhere) { return $null }
+    $arguments = @('-latest', '-products', '*', '-requires', 'Microsoft.Component.MSBuild')
+    if ($RequireUniversalBuildTools) {
+        $arguments += 'Microsoft.VisualStudio.Workload.UniversalBuildTools'
+    }
+    $arguments += @('-property', 'installationPath')
+    $installation = (& $vswhere @arguments | Select-Object -First 1)
+    if ($installation) { return $installation.Trim() }
+    return $null
+}
+
+function Get-VsMsBuildPath {
+    $installation = Get-VsInstallationPath -RequireUniversalBuildTools
+    if (-not $installation) {
+        throw 'Visual Studio Build Tools with Universal Windows Platform build tools is required. Run windows/bootstrap.ps1 -InstallMissing.'
+    }
+    $msbuild = Join-Path $installation 'MSBuild\Current\Bin\MSBuild.exe'
+    if (-not (Test-Path $msbuild -PathType Leaf)) {
+        throw "MSBuild was not found below the Visual Studio installation: $installation"
+    }
+    return $msbuild
+}
+
 function Invoke-Native {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,

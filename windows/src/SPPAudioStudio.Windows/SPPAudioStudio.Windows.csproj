@@ -10,11 +10,7 @@
     <PlatformTarget>x64</PlatformTarget>
     <UseWinUI>true</UseWinUI>
     <WindowsPackageType>None</WindowsPackageType>
-    <WindowsAppSDKSelfContained>false</WindowsAppSDKSelfContained>
-    <EnableCoreMrtTooling>false</EnableCoreMrtTooling>
-    <AppxGeneratePriEnabled>false</AppxGeneratePriEnabled>
-    <IncludeProjectPriFile>false</IncludeProjectPriFile>
-    <IncludeCopyLocalFilesOutputGroup>false</IncludeCopyLocalFilesOutputGroup>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationIcon>Assets\pixel_icon.ico</ApplicationIcon>

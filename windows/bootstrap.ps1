@@ -26,12 +26,6 @@ function Install-WingetPackage {
     Invoke-Native 'winget.exe' @arguments
 }
 
-function Get-VsWherePath {
-    $candidate = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-    if (Test-Path $candidate -PathType Leaf) { return $candidate }
-    return $null
-}
-
 Push-Location $PSScriptRoot
 try {
     $missing = New-Object System.Collections.Generic.List[string]
@@ -59,13 +53,9 @@ try {
         $missing.Add('Python.Python.3.11')
     }
 
-    $vswhere = Get-VsWherePath
-    $hasBuildTools = $false
-    if ($vswhere) {
-        $installation = & $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild -property installationPath
-        $hasBuildTools = [bool]$installation
-        if ($hasBuildTools) { Write-Host "MSBuild toolchain: $installation" }
-    }
+    $installation = Get-VsInstallationPath -RequireUniversalBuildTools
+    $hasBuildTools = [bool]$installation
+    if ($hasBuildTools) { Write-Host "MSBuild/UWP toolchain: $installation" }
     if (-not $hasBuildTools) { $missing.Add('Microsoft.VisualStudio.2022.BuildTools') }
 
     if ($missing.Count -gt 0 -and -not $InstallMissing) {
@@ -77,7 +67,7 @@ try {
             if ($id -eq 'Microsoft.VisualStudio.2022.BuildTools') {
                 Install-WingetPackage $id @(
                     '--override',
-                    '--wait --passive --norestart --add Microsoft.VisualStudio.Workload.ManagedDesktopBuildTools --add Microsoft.VisualStudio.Component.Windows11SDK.22621 --includeRecommended'
+                    '--wait --passive --norestart --add Microsoft.VisualStudio.Workload.UniversalBuildTools --includeRecommended'
                 )
             } else {
                 Install-WingetPackage $id

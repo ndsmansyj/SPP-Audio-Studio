@@ -11,25 +11,23 @@ param(
 . (Join-Path $PSScriptRoot 'common.ps1')
 Assert-Command 'dotnet' 'Run windows/bootstrap.ps1 -InstallMissing.'
 $appProject = Resolve-AppProject $Project
+$msbuild = Get-VsMsBuildPath
 $runtime = "win-$Platform"
 $output = Join-Path $ArtifactsRoot "build\$Configuration\$Platform\app"
 New-Item $output -ItemType Directory -Force | Out-Null
 
 Push-Location $PSScriptRoot
 try {
-    if (-not $NoRestore) {
-        Invoke-Native 'dotnet' 'restore' $appProject '-r' $runtime "-p:Platform=$Platform"
-    }
-
     $buildArguments = @(
-        'build', $appProject,
-        '--configuration', $Configuration,
-        '--runtime', $runtime,
-        '--no-restore',
-        '--output', $output,
-        "-p:Platform=$Platform"
+        $appProject,
+        '/nologo', '/m', '/t:Build',
+        "/p:Configuration=$Configuration",
+        "/p:Platform=$Platform",
+        "/p:RuntimeIdentifier=$runtime",
+        "/p:OutputPath=$output\"
     )
-    Invoke-Native 'dotnet' @buildArguments
+    if (-not $NoRestore) { $buildArguments += '/restore' }
+    Invoke-Native $msbuild @buildArguments
 
     $converterProject = Join-Path $PSScriptRoot 'src\FormatConverter\FormatConverter.csproj'
     $converterOutput = Join-Path $PSScriptRoot 'bin'

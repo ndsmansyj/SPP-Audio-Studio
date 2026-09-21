@@ -99,6 +99,19 @@ class WindowsPackagingTests(unittest.TestCase):
         self.assertRegex(text, r"--hidden-import['\"],?\s*['\"]qwen_bridge")
         self.assertRegex(text, r"--hidden-import['\"],?\s*['\"]mel_bridge")
 
+    def test_winui_builds_with_visual_studio_msbuild_and_pri_enabled(self) -> None:
+        common = (WINDOWS / "common.ps1").read_text(encoding="utf-8")
+        build = (WINDOWS / "build.ps1").read_text(encoding="utf-8")
+        publish = (WINDOWS / "publish.ps1").read_text(encoding="utf-8")
+        project = (WINDOWS / "src/SPPAudioStudio.Windows/SPPAudioStudio.Windows.csproj").read_text(encoding="utf-8")
+        self.assertIn("function Get-VsMsBuildPath", common)
+        self.assertRegex(build, r"Invoke-Native\s+\$msbuild")
+        self.assertRegex(publish, r"Invoke-Native\s+\$msbuild")
+        self.assertIn("Microsoft.VisualStudio.Workload.UniversalBuildTools", (WINDOWS / "bootstrap.ps1").read_text(encoding="utf-8"))
+        self.assertIn("-p:WindowsAppSDKSelfContained=true", publish)
+        for disabled_property in ("EnableCoreMrtTooling", "AppxGeneratePriEnabled", "IncludeProjectPriFile"):
+            self.assertNotIn(disabled_property, project)
+
     def test_powershell_arguments_are_precomposed(self) -> None:
         for path in WINDOWS.glob("*.ps1"):
             text = path.read_text(encoding="utf-8")

@@ -12,6 +12,7 @@ param(
 . (Join-Path $PSScriptRoot 'common.ps1')
 Assert-Command 'dotnet' 'Run windows/bootstrap.ps1 -InstallMissing.'
 $appProject = Resolve-AppProject $Project
+$msbuild = Get-VsMsBuildPath
 $runtime = "win-$Platform"
 $publishRoot = Join-Path $ArtifactsRoot "publish\$runtime"
 $appOutput = Join-Path $publishRoot 'app'
@@ -24,19 +25,21 @@ New-Item $packageRoot -ItemType Directory -Force | Out-Null
 Push-Location $PSScriptRoot
 try {
     $publishArguments = @(
-        'build', $appProject,
-        '--configuration', 'Release',
-        '--runtime', $runtime,
-        '--output', $appOutput,
-        "-p:Platform=$Platform",
-        '-p:WindowsPackageType=None',
-        '-p:WindowsAppSDKSelfContained=false',
-        '-p:PublishSingleFile=false',
-        '-p:DebugType=embedded',
-        '-p:DebugSymbols=false'
+        $appProject,
+        '/nologo', '/m', '/t:Publish',
+        '/p:Configuration=Release',
+        "/p:Platform=$Platform",
+        "/p:RuntimeIdentifier=$runtime",
+        "/p:PublishDir=$appOutput\",
+        '/p:WindowsPackageType=None',
+        '-p:WindowsAppSDKSelfContained=true',
+        '/p:SelfContained=true',
+        '/p:PublishSingleFile=false',
+        '/p:DebugType=embedded',
+        '/p:DebugSymbols=false'
     )
-    if ($NoRestore) { $publishArguments += '--no-restore' }
-    Invoke-Native 'dotnet' @publishArguments
+    if (-not $NoRestore) { $publishArguments += '/restore' }
+    Invoke-Native $msbuild @publishArguments
 
     $converterProject = Join-Path $PSScriptRoot 'src\FormatConverter\FormatConverter.csproj'
     if (-not $SkipWorker) { $converterOutput = Join-Path $workerOutput 'bin' } else { $converterOutput = Join-Path $appOutput 'bin' }
