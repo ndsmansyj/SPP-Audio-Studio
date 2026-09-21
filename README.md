@@ -14,27 +14,22 @@
 
 ---
 
-<div align="center">
-<a href="assets/poster/spp-audio-studio-poster.png"><img src="assets/poster/spp-audio-studio-poster.png" width="520" alt="SPP Audio Studio 功能海报"></a>
-</div>
-
-把常用的音频处理放进一个窗口：拖入文件，选择需要的结果，然后导出或试听。
+SPP Audio Studio 把常用的本地音频处理集中到一个简单的桌面应用里：拖入文件，选择需要的结果，然后导出或试听。
 
 | 功能 | 可以做什么 |
 | --- | --- |
-| **格式转换** | 批量转换受支持的本地音频格式，导出 MP3 或 FLAC。 |
+| **格式转换** | 处理受支持的本地音频文件，统一导出为常用音频格式。 |
 | **人声分离** | 使用 Mel-Deux 导出人声、伴奏，或同时导出两者。 |
 | **声音克隆** | 使用 Qwen3-TTS 和参考音生成语音，支持常用人声模板。 |
 
-## 使用与状态
+## 特点
 
-- 支持 Apple Silicon Mac，目标系统为 macOS 14 及更新版本；暂不支持 Intel Mac。
-- 音频默认在本机处理。源文件只读；同名输出会自动加序号。
-- AI 功能所需的模型与运行环境可在应用的「模型与环境」页面一键安装，也可链接已有的本地模型。
-- 特殊格式转换在公开构建中通过你本机自行准备的兼容转换器完成；只需在「模型与环境」选择一次，格式转换页仍保持拖入即用。SPP Audio Studio 不下载、不捆绑或指定任何具体第三方转换器。
-- 转换后的 MP3 / FLAC 会尽量保留可用的歌曲信息和封面；若来源本身没有可用封面，导出文件也可能没有封面。
-- 本机脚本可通过 [本机 API](LOCAL_API.md) 调用转换、人声分离和克隆。
-- 当前 0.3.0 RC 版本正在跨设备测试。安装包与更新信息见 [Releases](https://github.com/ndsmansyj/SPP-Audio-Studio/releases)；测试反馈可提交 [Issue](https://github.com/ndsmansyj/SPP-Audio-Studio/issues)。
+- **本地优先**：音频处理默认在本机完成。
+- **拖入即用**：尽量减少命令行、环境配置和重复操作。
+- **源文件只读**：不会覆盖原始音频；同名输出会自动加序号。
+- **环境集成**：AI 模型与运行环境可以在「模型与环境」页面安装和检查。
+- **统一工作流**：转换、分离、克隆、试听和输出集中在同一个应用中。
+- **可诊断**：遇到问题时可以直接复制诊断报告，便于反馈和排查。
 
 ## 下载与首次打开
 
@@ -42,11 +37,25 @@
 2. 打开 DMG，把 **SPP Audio Studio** 拖到 **Applications**。
 3. 当前免费测试版没有 Apple Developer ID。如果 macOS 提示“无法验证开发者”，前往 **系统设置 → 隐私与安全性 → 仍要打开**。
 
-当前版本已自带 Python Core，普通用户**不需要安装 Xcode、Command Line Tools、Homebrew 或系统 Python**。
+当前版本自带 Python Core，普通用户**不需要额外安装 Xcode、Command Line Tools、Homebrew 或系统 Python**。
 
-首次使用 AI 功能时，在「模型与环境」页面点击 **一键下载并安装**；也可以分别安装所需组件。
+首次使用 AI 功能时，在「模型与环境」页面完成所需组件安装即可。
 
-遇到问题时，打开「模型与环境」→ **复制诊断报告**，直接把文字粘贴到群里或 GitHub Issue；报告默认隐藏用户名、完整文件路径和声音克隆正文。
+## 反馈与诊断
+
+如果遇到问题：
+
+1. 打开「模型与环境」。
+2. 点击 **复制诊断报告**。
+3. 将报告粘贴到 GitHub Issue，并简单说明复现步骤。
+
+诊断报告默认隐藏用户名、完整文件路径和声音克隆正文。
+
+## 本机 API
+
+SPP Audio Studio 提供本机 API，可用于连接本地脚本、Agent 或自动化工作流。
+
+使用说明见 [LOCAL_API.md](LOCAL_API.md)。
 
 ## 从源码构建
 
@@ -56,8 +65,14 @@
 ./scripts/build_local.sh
 ```
 
-默认构建不包含内置特殊格式解密核心，仅保留 External Converter Adapter。仅用于私有兼容性测试时，可显式设置 `SPP_INCLUDE_BUILTIN_NCM=1` 再构建。
-
 ## 许可证
 
-项目代码采用 [MIT License](LICENSE)。默认演示人声、像素头像/品牌图标和第三方模型分别遵循独立条款；使用或再分发前请阅读 [人声素材说明](VOICE_ASSET_LICENSE.md)、[品牌与肖像素材说明](BRANDING_ASSET_LICENSE.md) 与 [第三方声明](THIRD_PARTY_NOTICES.md)。Mel-Deux 模型采用 **CC BY-NC 4.0**，不适用于商业用途。
+项目代码采用 [MIT License](LICENSE)。
+
+默认演示人声、像素头像 / 品牌图标和第三方模型分别遵循独立条款；使用或再分发前请阅读：
+
+- [人声素材说明](VOICE_ASSET_LICENSE.md)
+- [品牌与肖像素材说明](BRANDING_ASSET_LICENSE.md)
+- [第三方声明](THIRD_PARTY_NOTICES.md)
+
+Mel-Deux 模型采用 **CC BY-NC 4.0**，不适用于商业用途。
