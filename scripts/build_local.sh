@@ -29,7 +29,7 @@ swiftc -swift-version 5 -parse-as-library "$ROOT/app/SPPAudioStudio.swift" \
   -framework SwiftUI -framework AppKit -framework AVFoundation -framework UniformTypeIdentifiers \
   -o "$APP/Contents/MacOS/SPPAudioStudio"
 
-cp "$ROOT/worker/spp_worker.py" "$ROOT/worker/qwen_bridge.py" "$ROOT/worker/mel_bridge.py" "$APP/Contents/Resources/worker/"
+cp "$ROOT/worker/spp_worker.py" "$ROOT/worker/qwen_bridge.py" "$ROOT/worker/mel_bridge.py" "$ROOT/worker/local_api.py" "$APP/Contents/Resources/worker/"
 cp "$ROOT/assets/default_voice/reference.wav" "$ROOT/assets/default_voice/reference.txt" "$APP/Contents/Resources/default_voice/"
 
 # Bundle a relocatable Python core so clean Macs never need /usr/bin/python3 or Xcode Command Line Tools.

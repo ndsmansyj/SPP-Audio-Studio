@@ -14,6 +14,7 @@ from pathlib import Path
 QWEN_MODEL = Path(os.environ.get("SPP_QWEN_MODEL", "")).expanduser()
 ASR_PY = Path(os.environ.get("SPP_ASR_PY", "")).expanduser()
 ASR_MODEL = Path(os.environ.get("SPP_ASR_MODEL", "")).expanduser()
+ASR_SITE = os.environ.get("SPP_ASR_SITE", "")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -39,6 +40,8 @@ def transcribe(wav_path: Path) -> str:
     )
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
+    if ASR_SITE:
+        env["PYTHONPATH"] = ASR_SITE
     proc = subprocess.run(
         [str(ASR_PY), "-c", script, str(wav_path), str(ASR_MODEL)],
         capture_output=True, text=True, env=env, timeout=300

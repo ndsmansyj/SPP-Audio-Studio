@@ -14,6 +14,10 @@
 
 ---
 
+<div align="center">
+<a href="assets/poster/spp-audio-studio-poster.png"><img src="assets/poster/spp-audio-studio-poster.png" width="520" alt="SPP Audio Studio 功能海报"></a>
+</div>
+
 把常用的音频处理放进一个窗口：拖入文件，选择需要的结果，然后导出或试听。
 
 | 功能 | 可以做什么 |
@@ -26,8 +30,10 @@
 
 - 支持 Apple Silicon Mac，目标系统为 macOS 14 及更新版本；暂不支持 Intel Mac。
 - 音频默认在本机处理。源文件只读；同名输出会自动加序号。
-- AI 功能所需的模型与运行环境可在应用的「模型与环境」页面安装，也可链接已有的本地模型。
-- 当前 RC 版本正在跨设备测试。安装包与更新信息见 [Releases](https://github.com/ndsmansyj/SPP-Audio-Studio/releases)；测试反馈可提交 [Issue](https://github.com/ndsmansyj/SPP-Audio-Studio/issues)。
+- AI 功能所需的模型与运行环境可在应用的「模型与环境」页面一键安装，也可链接已有的本地模型。
+- `.ncm` 转换会保留文件中已有的歌曲信息和封面；若源文件本身没有内嵌封面，导出文件也可能没有封面。
+- 本机脚本可通过 [本机 API](LOCAL_API.md) 调用转换、人声分离和克隆。
+- 当前 0.3.0 RC 版本正在跨设备测试。安装包与更新信息见 [Releases](https://github.com/ndsmansyj/SPP-Audio-Studio/releases)；测试反馈可提交 [Issue](https://github.com/ndsmansyj/SPP-Audio-Studio/issues)。
 
 ## 下载与首次打开
 
@@ -35,9 +41,9 @@
 2. 打开 DMG，把 **SPP Audio Studio** 拖到 **Applications**。
 3. 当前免费测试版没有 Apple Developer ID。如果 macOS 提示“无法验证开发者”，前往 **系统设置 → 隐私与安全性 → 仍要打开**。
 
-RC6 已自带 Python Core，普通用户**不需要安装 Xcode、Command Line Tools、Homebrew 或系统 Python**。
+当前版本已自带 Python Core，普通用户**不需要安装 Xcode、Command Line Tools、Homebrew 或系统 Python**。
 
-首次使用 AI 功能时，在「模型与环境」页面先安装对应的 **Qwen / Mel Runtime**，再下载对应模型即可。
+首次使用 AI 功能时，在「模型与环境」页面点击 **一键下载并安装**；也可以分别安装所需组件。
 
 遇到问题时，打开「模型与环境」→ **复制诊断报告**，直接把文字粘贴到群里或 GitHub Issue；报告默认隐藏用户名、完整文件路径和声音克隆正文。
 

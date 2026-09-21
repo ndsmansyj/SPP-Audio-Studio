@@ -75,6 +75,8 @@ struct NcmParsed {
     let rc4Key: [UInt8]
     let format: String
     let audio: Data
+    let metadata: [String: Any]
+    let cover: Data?
 }
 
 func parseNcm(_ data: Data) throws -> NcmParsed {
@@ -93,6 +95,7 @@ func parseNcm(_ data: Data) throws -> NcmParsed {
 
     // meta 段：xor 0x63 → [22:] → base64 → AES-ECB(META_KEY) → unpad → "music:" → JSON
     var format = "mp3"
+    var metadata: [String: Any] = [:]
     let metaLen = Int(data.u32LE(at: off)); off += 4
     if metaLen > 0 {
         guard off + metaLen <= data.count else { throw NcmError("文件结构损坏（meta 段越界）") }
@@ -103,9 +106,9 @@ func parseNcm(_ data: Data) throws -> NcmParsed {
         let metaStr = String(data: pkcs7Unpad(metaPlainAll), encoding: .utf8) ?? ""
         if let r = metaStr.range(of: "music:"),
            let obj = try? JSONSerialization.jsonObject(
-               with: Data(metaStr[r.upperBound...].utf8)) as? [String: Any],
-           let f = obj["format"] as? String {
-            format = f
+               with: Data(metaStr[r.upperBound...].utf8)) as? [String: Any] {
+            metadata = obj
+            format = obj["format"] as? String ?? format
         }
     } else {
         format = data.count > 1024 * 1024 * 16 ? "flac" : "mp3"
@@ -115,16 +118,20 @@ func parseNcm(_ data: Data) throws -> NcmParsed {
     off += 5
 
     // 封面段
+    var cover: Data? = nil
     if off + 8 <= data.count {
         let coverLen = Int(data.u32LE(at: off)); off += 4
         let imgSize = Int(data.u32LE(at: off)); off += 4
-        if imgSize > 0, off + imgSize <= data.count { off += imgSize }
+        if imgSize > 0, off + imgSize <= data.count {
+            cover = Data(data[off..<off + imgSize])
+            off += imgSize
+        }
         let rest = coverLen - imgSize
         if rest > 0, off + rest <= data.count { off += rest }
     }
 
     guard off < data.count else { throw NcmError("没有音频数据") }
-    return NcmParsed(rc4Key: rc4Key, format: format, audio: Data(data[off..<data.count]))
+    return NcmParsed(rc4Key: rc4Key, format: format, audio: Data(data[off..<data.count]), metadata: metadata, cover: cover)
 }
 
 func buildXorStream(_ S: [UInt8]) -> [UInt8] {
@@ -137,10 +144,108 @@ func buildXorStream(_ S: [UInt8]) -> [UInt8] {
     return stream
 }
 
+func be32(_ n: Int) -> Data {
+    Data([UInt8((n >> 24) & 255), UInt8((n >> 16) & 255), UInt8((n >> 8) & 255), UInt8(n & 255)])
+}
+
+func le32(_ n: Int) -> Data {
+    Data([UInt8(n & 255), UInt8((n >> 8) & 255), UInt8((n >> 16) & 255), UInt8((n >> 24) & 255)])
+}
+
+func songFields(_ meta: [String: Any]) -> [(String, String, String)] {
+    let artists = (meta["artist"] as? [[Any]] ?? []).compactMap { $0.first as? String }.joined(separator: ", ")
+    let title = meta["musicName"] as? String ?? ""
+    let album = meta["album"] as? String ?? ""
+    return [("TIT2", "TITLE", title), ("TPE1", "ARTIST", artists), ("TALB", "ALBUM", album)].filter { !$0.2.isEmpty }
+}
+
+func taggedMP3(_ audio: Data, meta: [String: Any], cover: Data?) -> Data {
+    var frames = Data()
+    for (id, _, value) in songFields(meta) {
+        var payload = Data([3]) // UTF-8 text frame
+        payload.append(Data(value.utf8))
+        frames.append(Data(id.utf8))
+        frames.append(be32(payload.count))
+        frames.append(Data([0, 0]))
+        frames.append(payload)
+    }
+    if let cover, !cover.isEmpty {
+        let mime = cover.starts(with: Data([0x89, 0x50, 0x4e, 0x47])) ? "image/png" : "image/jpeg"
+        var payload = Data([3])
+        payload.append(Data(mime.utf8))
+        payload.append(Data([0, 3, 0])) // front cover
+        payload.append(cover)
+        frames.append(Data("APIC".utf8))
+        frames.append(be32(payload.count))
+        frames.append(Data([0, 0]))
+        frames.append(payload)
+    }
+    guard !frames.isEmpty else { return audio }
+    let length = frames.count
+    let synchsafe = Data([UInt8((length >> 21) & 127), UInt8((length >> 14) & 127), UInt8((length >> 7) & 127), UInt8(length & 127)])
+    var result = Data("ID3".utf8)
+    result.append(Data([3, 0, 0]))
+    result.append(synchsafe)
+    result.append(frames)
+    result.append(audio)
+    return result
+}
+
+func flacBlock(type: UInt8, last: Bool, payload: Data) -> Data {
+    var result = Data([type | (last ? 0x80 : 0), UInt8((payload.count >> 16) & 255), UInt8((payload.count >> 8) & 255), UInt8(payload.count & 255)])
+    result.append(payload)
+    return result
+}
+
+func taggedFLAC(_ audio: Data, meta: [String: Any], cover: Data?) -> Data {
+    guard audio.starts(with: Data("fLaC".utf8)) else { return audio }
+    guard !songFields(meta).isEmpty || (cover?.isEmpty == false) else { return audio }
+    var blocks: [(UInt8, Data)] = []
+    var offset = 4
+    var last = false
+    while !last && offset + 4 <= audio.count {
+        let header = audio[offset]
+        last = header & 0x80 != 0
+        let kind = header & 0x7f
+        let length = Int(audio[offset + 1]) << 16 | Int(audio[offset + 2]) << 8 | Int(audio[offset + 3])
+        offset += 4
+        guard offset + length <= audio.count else { return audio }
+        if kind != 4 && kind != 6 { blocks.append((kind, Data(audio[offset..<offset + length]))) }
+        offset += length
+    }
+    guard last else { return audio }
+    let vendor = Data("SPP Audio Studio".utf8)
+    var comments = Data()
+    comments.append(le32(vendor.count)); comments.append(vendor)
+    let fields = songFields(meta)
+    comments.append(le32(fields.count))
+    for (_, key, value) in fields {
+        let item = Data("\(key)=\(value)".utf8)
+        comments.append(le32(item.count)); comments.append(item)
+    }
+    blocks.append((4, comments))
+    if let cover, !cover.isEmpty {
+        let mime = Data((cover.starts(with: Data([0x89, 0x50, 0x4e, 0x47])) ? "image/png" : "image/jpeg").utf8)
+        var picture = be32(3)
+        picture.append(be32(mime.count)); picture.append(mime)
+        picture.append(be32(0)) // description
+        for _ in 0..<4 { picture.append(be32(0)) } // dimensions and depth
+        picture.append(be32(cover.count)); picture.append(cover)
+        blocks.append((6, picture))
+    }
+    var result = Data("fLaC".utf8)
+    for (index, block) in blocks.enumerated() {
+        result.append(flacBlock(type: block.0, last: index == blocks.count - 1, payload: block.1))
+    }
+    result.append(audio[offset...])
+    return result
+}
+
 func convertFile(src: URL, outDir: String, fmtChoice: String, skip: Bool) throws -> URL {
     let data = try Data(contentsOf: src)
     let parsed = try parseNcm(data)
-    let ext = (fmtChoice == "原格式") ? parsed.format : fmtChoice
+    // Decryption preserves the original codec; it does not transcode.
+    let ext = parsed.format.lowercased()
     let outURL = URL(fileURLWithPath: outDir)
         .appendingPathComponent(src.deletingPathExtension().lastPathComponent)
         .appendingPathExtension(ext == "flac" ? "flac" : "mp3")
@@ -161,7 +266,11 @@ func convertFile(src: URL, outDir: String, fmtChoice: String, skip: Bool) throws
     for (k, b) in bytes.enumerated() {
         plain[k] = b ^ stream[(k + 1) & 0xff]
     }
-    try Data(plain).write(to: outURL)
+    let decoded = Data(plain)
+    let tagged = parsed.format.lowercased() == "flac"
+        ? taggedFLAC(decoded, meta: parsed.metadata, cover: parsed.cover)
+        : taggedMP3(decoded, meta: parsed.metadata, cover: parsed.cover)
+    try tagged.write(to: outURL)
     return outURL
 }
 
@@ -358,7 +467,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         fmtRow.spacing = 8
         fmtRow.addArrangedSubview(makeLabel("输出格式", 13))
         fmtPopup = NSPopUpButton()
-        fmtPopup.addItems(withTitles: ["mp3", "flac", "原格式"])
+        fmtPopup.addItems(withTitles: ["原格式（MP3 / FLAC）"])
         fmtRow.addArrangedSubview(fmtPopup)
         root.addArrangedSubview(fmtRow)
 

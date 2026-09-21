@@ -138,6 +138,11 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published var lastVoiceOutput: String?
 
     @Published var downloadSource = "auto"
+    @Published var whisperInstalled = false
+    @Published var whisperModelSource = "missing"
+    @Published var whisperModelPath = ""
+    @Published var asrRuntimeInstalled = false
+    @Published var asrRuntimeSource = "missing"
     @Published var qwenInstalled = false
     @Published var qwenModelSource = "missing"
     @Published var qwenModelPath = ""
@@ -148,6 +153,8 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published var qwenRuntimeSource = "missing"
     @Published var separatorInstalled = false
     @Published var separatorSource = "missing"
+    @Published var batchBusy = false
+    @Published var batchProgress = ""
     @Published var modelBusy: String?
     @Published var runtimeBusy: String?
     @Published var modelStatusMessage = ""
@@ -403,12 +410,19 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
                 let json = try self.runWorkerSync(["model-status"])
                 let models = json["models"] as? [String: Any] ?? [:]
                 let runtime = json["runtime"] as? [String: Any] ?? [:]
+                let whisper = models["whisper"] as? [String: Any] ?? [:]
+                let asr = runtime["asr_python"] as? [String: Any] ?? [:]
                 let qwen = models["qwen"] as? [String: Any] ?? [:]
                 let mel = models["mel_deux"] as? [String: Any] ?? [:]
                 let qrun = runtime["qwen_python"] as? [String: Any] ?? [:]
                 let sep = runtime["separator"] as? [String: Any] ?? [:]
                 DispatchQueue.main.async {
                     self.downloadSource = json["download_source"] as? String ?? "auto"
+                    self.whisperInstalled = whisper["installed"] as? Bool ?? false
+                    self.whisperModelSource = whisper["source"] as? String ?? "missing"
+                    self.whisperModelPath = whisper["path"] as? String ?? ""
+                    self.asrRuntimeInstalled = asr["installed"] as? Bool ?? false
+                    self.asrRuntimeSource = asr["source"] as? String ?? "missing"
                     self.qwenInstalled = qwen["installed"] as? Bool ?? false
                     self.qwenModelSource = qwen["source"] as? String ?? "missing"
                     self.qwenModelPath = qwen["path"] as? String ?? ""
@@ -442,7 +456,7 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
     func linkModel(kind: String, url: URL) {
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let flag = kind == "qwen" ? "--qwen-model-dir" : "--mel-model-dir"
+                let flag = kind == "qwen" ? "--qwen-model-dir" : (kind == "whisper" ? "--asr-model" : "--mel-model-dir")
                 _ = try self.runWorkerSync(["model-link", flag, url.path])
                 DispatchQueue.main.async { self.modelStatusMessage = "已链接本地模型" }
                 self.refreshModels()
@@ -456,7 +470,7 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
     func downloadModel(_ kind: String) {
         guard modelBusy == nil else { return }
         modelBusy = kind
-        modelStatusMessage = kind == "qwen" ? "正在下载 Qwen3-TTS…" : "正在下载 Mel-Deux…"
+        modelStatusMessage = kind == "qwen" ? "正在下载 Qwen3-TTS…" : (kind == "whisper" ? "正在下载 Whisper…" : "正在下载 Mel-Deux…")
         let source = downloadSource
         DispatchQueue.global(qos: .userInitiated).async {
             do {
@@ -479,7 +493,7 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
     func installRuntime(_ kind: String) {
         guard runtimeBusy == nil else { return }
         runtimeBusy = kind
-        let label = kind == "qwen" ? "Qwen / MLX" : "Mel Separator"
+        let label = kind == "qwen" ? "Qwen / MLX" : (kind == "asr" ? "Whisper ASR" : "Mel Separator")
         modelStatusMessage = "正在安装 \(label) 运行环境…"
         logger.append("install.log", "runtime install requested kind=\(kind)")
         let source = downloadSource
@@ -501,6 +515,60 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
                 }
                 self.recordError(message, context: "runtime-install \(kind)")
             }
+        }
+    }
+
+    func installAllComponents() {
+        guard !batchBusy && modelBusy == nil && runtimeBusy == nil else { return }
+        let work: [(String, String)] = [
+            ("runtime", "qwen"), ("model", "qwen"),
+            ("runtime", "mel"), ("model", "mel"),
+            ("runtime", "asr"), ("model", "whisper")
+        ].filter { type, kind in
+            switch (type, kind) {
+            case ("runtime", "qwen"): return !qwenRuntimeInstalled
+            case ("model", "qwen"): return !qwenInstalled
+            case ("runtime", "mel"): return !separatorInstalled
+            case ("model", "mel"): return !melInstalled
+            case ("runtime", "asr"): return !asrRuntimeInstalled
+            case ("model", "whisper"): return !whisperInstalled
+            default: return false
+            }
+        }
+        guard !work.isEmpty else {
+            batchProgress = "所需组件已经安装"
+            return
+        }
+        batchBusy = true
+        let source = downloadSource
+        DispatchQueue.global(qos: .userInitiated).async {
+            for (index, item) in work.enumerated() {
+                let (type, kind) = item
+                let label = kind == "qwen" ? "Qwen" : (kind == "mel" ? "Mel" : "Whisper")
+                DispatchQueue.main.async {
+                    self.batchProgress = "第 \(index + 1)/\(work.count) 项：\(type == "runtime" ? "安装" : "下载") \(label)…"
+                }
+                do {
+                    let command = type == "runtime" ? "runtime-install" : "model-download"
+                    _ = try self.runWorkerSync([command, kind, "--source", source])
+                } catch {
+                    let message = self.logger.sanitize(error.localizedDescription)
+                    DispatchQueue.main.async {
+                        self.batchBusy = false
+                        self.batchProgress = "\(label) 失败：\(message)"
+                    }
+                    self.recordError(message, context: "install-all \(kind)")
+                    self.refreshModels()
+                    self.refreshDoctor()
+                    return
+                }
+            }
+            DispatchQueue.main.async {
+                self.batchBusy = false
+                self.batchProgress = "模型与运行环境安装完成"
+            }
+            self.refreshModels()
+            self.refreshDoctor()
         }
     }
 
@@ -562,7 +630,7 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
         }
     }
 
-    func clone(templateID: String?, temporaryRef: URL?, text: String, outputDir: String = "") {
+    func clone(templateID: String?, temporaryRef: URL?, temporaryRefText: String = "", text: String, outputDir: String = "") {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             voiceStatus = "先输入需要生成的文案"
             return
@@ -576,6 +644,8 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
                 let json: [String: Any]
                 if let ref = temporaryRef {
                     var args = ["clone", "--ref-audio", ref.path, "--text", text]
+                    let referenceText = temporaryRefText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !referenceText.isEmpty { args += ["--ref-text", referenceText] }
                     if !expandedOutput.isEmpty { args += ["--output-dir", expandedOutput] }
                     json = try self.runWorkerSync(args)
                 } else if let id = templateID {
@@ -766,7 +836,7 @@ struct RootView: View {
         } detail: {
             Group {
                 switch selection ?? .workbench {
-                case .workbench: WorkbenchView()
+                case .workbench: WorkbenchView(selection: $selection)
                 case .convert: FileToolView(mode: .convert, title: "格式转换", subtitle: "特殊格式 → 原始 MP3 / FLAC")
                 case .separate: FileToolView(mode: .separate, title: "人声分离", subtitle: "Mel-Deux · 去人声 / 提取人声 / 双轨输出")
                 case .clone: VoiceCloneView()
@@ -855,6 +925,7 @@ struct OutputDestinationControls: View {
 }
 
 struct WorkbenchView: View {
+    @Binding var selection: SidebarItem?
     @EnvironmentObject var state: AppState
     @State private var files: [URL] = []
     @State private var mode: ToolMode = .convertAndSeparate
@@ -866,6 +937,25 @@ struct WorkbenchView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             HeaderBlock(title: "音频工作台", subtitle: "转换音乐、人声分离、克隆声音。常用操作尽量一处完成。")
+            if !state.qwenInstalled || !state.melInstalled || !state.qwenRuntimeInstalled || !state.separatorInstalled {
+                HStack(spacing: 14) {
+                    Image(systemName: "arrow.down.circle")
+                        .font(.title2)
+                        .foregroundStyle(Color.accentColor)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("首次使用：安装模型和运行环境")
+                            .font(.headline)
+                        Text("声音克隆需要 Qwen；人声分离需要 Mel。请到「模型与环境」完成对应安装。")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 8)
+                    Button("前往安装") { selection = .environment }
+                        .buttonStyle(.borderedProminent)
+                }
+                .padding(16)
+                .background(Color.accentColor.opacity(0.09), in: RoundedRectangle(cornerRadius: 14))
+            }
             Picker("模式", selection: $mode) {
                 ForEach(ToolMode.allCases) { Text($0.rawValue).tag($0) }
             }
@@ -1227,6 +1317,7 @@ struct VoiceCloneView: View {
     @EnvironmentObject var state: AppState
     @State private var selectedVoice: String?
     @State private var temporaryRef: URL?
+    @State private var temporaryRefText = ""
     @State private var text = "大家好，我是宋盼盼。这是一段 SPP Audio Studio 的声音克隆测试。如果你能自然地听到这句话，说明人声模板、模型和本地推理都已经正常工作。"
     @State private var showAdd = false
     @AppStorage("clone.outputMode") private var outputMode = "default"
@@ -1264,7 +1355,34 @@ struct VoiceCloneView: View {
                 }
             }
 
+            VStack(alignment: .leading, spacing: 5) {
+                Label("参考音建议", systemImage: "waveform")
+                    .font(.headline)
+                Text("推荐 5–15 秒、单人清晰说话、少背景音乐和回声。支持 WAV、M4A、MP3，也可选 FLAC、AAC、AIFF 或 CAF。")
+                Text("参考音里的原话要与音频一致；安装 Whisper 后可以留空自动转写。")
+            }
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
+
+            if temporaryRef != nil {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("临时参考音的原话").font(.headline)
+                    TextField("输入参考音频里说的话", text: $temporaryRefText, axis: .vertical)
+                        .lineLimit(2...4)
+                        .textFieldStyle(.roundedBorder)
+                    Text("未配置 Whisper 时需填写。这里填写参考音说的话，不是要生成的文案。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             Text("生成文案").font(.headline)
+            Text("克隆结果偶尔会有波动，可以多生成两版挑选；文案较长时建议分成两段生成。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             TextEditor(text: $text)
                 .font(.system(size: 16))
                 .scrollContentBackground(.hidden)
@@ -1303,6 +1421,7 @@ struct VoiceCloneView: View {
                     state.clone(
                         templateID: id,
                         temporaryRef: temporaryRef,
+                        temporaryRefText: temporaryRefText,
                         text: text,
                         outputDir: effectiveCloneOutputDir
                     )
@@ -1405,6 +1524,7 @@ struct VoiceCloneView: View {
         if panel.runModal() == .OK, let url = panel.url,
            isSupportedAudio(url), url.pathExtension.lowercased() != "ncm" {
             temporaryRef = url
+            temporaryRefText = ""
             selectedVoice = nil
         }
     }
@@ -1462,7 +1582,10 @@ struct AddVoiceSheet: View {
                 Spacer()
                 Button("选择参考音…") { chooseRef() }
             }
-            TextField("参考音频里说了什么（可留空自动识别）", text: $refText)
+            TextField("参考音频里说了什么", text: $refText)
+            Text("未配置 Whisper 时需填写参考音频的原话。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             TextField("备注，例如：日常短视频 / 轻松自然", text: $note)
             Toggle("设为默认人声", isOn: $makeDefault)
             Spacer()
@@ -1522,6 +1645,29 @@ struct EnvironmentView: View {
                     }
                 }
 
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("一键安装全部组件").font(.headline)
+                        Text("依次安装 Qwen、Mel 和 Whisper 的模型与运行环境；已安装的项目会跳过。约需 5 GB 模型空间。")
+                            .font(.caption).foregroundStyle(.secondary)
+                        if !state.batchProgress.isEmpty {
+                            Text(state.batchProgress).font(.caption).foregroundStyle(.secondary)
+                                .lineLimit(3).textSelection(.enabled)
+                        }
+                    }
+                    Spacer(minLength: 8)
+                    Button {
+                        state.installAllComponents()
+                    } label: {
+                        if state.batchBusy { ProgressView().controlSize(.small) }
+                        Text(state.batchBusy ? "安装中…" : "一键下载并安装")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(state.batchBusy || state.modelBusy != nil || state.runtimeBusy != nil)
+                }
+                .padding(16)
+                .background(Color.accentColor.opacity(0.09), in: RoundedRectangle(cornerRadius: 14))
+
                 HStack(spacing: 10) {
                     Image(systemName: state.doctorOK ? "checkmark.seal.fill" : (state.coreReady ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"))
                         .foregroundStyle(state.doctorOK ? .green : (state.coreReady ? .green : .orange))
@@ -1565,6 +1711,17 @@ struct EnvironmentView: View {
                         path: state.melModelPath
                     )
                 }
+
+                modelCard(
+                    kind: "whisper",
+                    title: "Whisper large-v3-turbo（可选）",
+                    subtitle: "临时参考音自动转写 · MLX",
+                    size: "约 1.5 GB",
+                    license: "模型条款见 Hugging Face",
+                    installed: state.whisperInstalled,
+                    source: state.whisperModelSource,
+                    path: state.whisperModelPath
+                )
 
                 runtimeCard
 
@@ -1674,10 +1831,10 @@ struct EnvironmentView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(state.modelBusy != nil)
+                .disabled(state.modelBusy != nil || state.batchBusy)
 
                 Button("链接本地…") { chooseModelFolder(kind: kind) }
-                    .disabled(state.modelBusy != nil)
+                    .disabled(state.modelBusy != nil || state.batchBusy)
             }
         }
         .padding(16)
@@ -1716,7 +1873,7 @@ struct EnvironmentView: View {
                         }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(state.runtimeBusy != nil)
+                    .disabled(state.runtimeBusy != nil || state.batchBusy)
                 }
             }
 
@@ -1736,7 +1893,25 @@ struct EnvironmentView: View {
                         }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(state.runtimeBusy != nil)
+                    .disabled(state.runtimeBusy != nil || state.batchBusy)
+                }
+            }
+
+            HStack {
+                Label("Whisper ASR（可选）：\(sourceLabel(state.asrRuntimeSource))",
+                      systemImage: state.asrRuntimeInstalled ? "checkmark.circle.fill" : "xmark.circle")
+                Spacer()
+                if !state.asrRuntimeInstalled {
+                    Button { state.installRuntime("asr") } label: {
+                        if state.runtimeBusy == "asr" {
+                            ProgressView().controlSize(.small)
+                            Text("安装中…")
+                        } else {
+                            Text("安装 Whisper Runtime")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(state.runtimeBusy != nil || state.batchBusy)
                 }
             }
 
