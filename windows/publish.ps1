@@ -39,6 +39,11 @@ try {
     if ($NoRestore) { $publishArguments += '--no-restore' }
     Invoke-Native 'dotnet' @publishArguments
 
+    $converterProject = Join-Path $PSScriptRoot 'src\FormatConverter\FormatConverter.csproj'
+    if (-not $SkipWorker) { $converterOutput = Join-Path $workerOutput 'bin' } else { $converterOutput = Join-Path $appOutput 'bin' }
+    New-Item $converterOutput -ItemType Directory -Force | Out-Null
+    Invoke-Native 'dotnet' 'publish' $converterProject '--configuration' 'Release' '--runtime' $runtime '--self-contained' 'true' '--output' $converterOutput '-p:PublishSingleFile=true' '-p:IncludeNativeLibrariesForSelfExtract=true'
+
     if (-not $SkipWorker) {
         $entryPoint = Resolve-WorkerEntryPoint $WorkerEntryPoint
         $venvPython = Get-VenvPython

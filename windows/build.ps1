@@ -31,6 +31,11 @@ try {
     )
     Invoke-Native 'dotnet' @buildArguments
 
+    $converterProject = Join-Path $PSScriptRoot 'src\FormatConverter\FormatConverter.csproj'
+    $converterOutput = Join-Path $PSScriptRoot 'bin'
+    New-Item $converterOutput -ItemType Directory -Force | Out-Null
+    Invoke-Native 'dotnet' 'build' $converterProject '--configuration' $Configuration '--no-restore' '--output' $converterOutput
+
     if (-not $SkipWorker) {
         $workerRoot = Join-Path $PSScriptRoot 'worker'
         if (-not (Test-Path $workerRoot -PathType Container)) {

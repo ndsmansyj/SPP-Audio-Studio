@@ -8,6 +8,7 @@ Windows 独立实现位于本目录，macOS 代码保持不变。
 - `src/SPPAudioStudio.Windows` — WinUI 3 / Windows App SDK 桌面应用。
 - `worker` — Windows 专用 Python Worker、本机 API 与 CUDA 推理桥接。
 - `tests/SPPAudioStudio.Core.Tests` — C# Core 测试。
+- `src/FormatConverter` — 无额外运行时依赖的 .NET 8 NCM 解密/封装 CLI。
 - `tests/test_worker.py` — 不下载模型即可运行的 Worker 测试。
 
 ## 当前开发构建
@@ -21,6 +22,8 @@ python -m unittest discover -s windows/tests -v
 应用最小窗口为 1040×720，固定深色主题。未成功连接 Worker 或模型未通过健康检查时，界面必须如实显示未就绪，不使用样例状态冒充真实运行状态。
 
 ## Windows Worker
+
+NCM 转换器命令行：`windows/artifacts/publish/win-x64/app/bin/format_converter.exe input.ncm --out output-dir`。它读取 NCM 的 AES/RC4 加密段，保留原始 MP3/FLAC 编码，不改写源文件，并在输出已存在时跳过。
 
 要求 Windows 11 x64、Python 3.11/3.12、`curl.exe` 与 FFmpeg。可通过 `SPP_PYTHON_CORE` 指定 App 自带 Python，通过 `SPP_FORMAT_BIN` 指定转换器。状态保存在 `%LOCALAPPDATA%\SPP Audio Studio\` 下，包括 `Models`、`Voices`、`Runtime`、`Cache`、设置及历史记录。
 
