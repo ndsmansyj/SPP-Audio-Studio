@@ -12,7 +12,7 @@ body:
     id: version
     attributes:
       label: SPP Audio Studio 版本
-      placeholder: 例如 0.2.0-rc5
+      placeholder: 例如 0.2.0-rc6
     validations:
       required: true
   - type: input

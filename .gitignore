@@ -36,3 +36,11 @@ Outputs/
 SPP Audio/
 history.jsonl
 settings.json
+
+# Temporary icon transfer
+assets/icon/*.b64
+
+# Generated / retired icon assets
+assets/icon/AppIcon.icns
+assets/icon/AppIcon.iconset/
+assets/icon/pelican.svg

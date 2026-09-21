@@ -27,7 +27,38 @@ BUNDLED_FORMAT_BIN = Path(__file__).resolve().parent.parent / "bin" / "format_co
 FORMAT_BIN = Path(os.environ.get("SPP_FORMAT_BIN", str(BUNDLED_FORMAT_BIN))).expanduser()
 MEL_MODEL = os.environ.get("SPP_MEL_MODEL", "becruily_deux.ckpt")
 BRIDGE = Path(__file__).with_name("qwen_bridge.py")
+MEL_BRIDGE = Path(__file__).with_name("mel_bridge.py")
 DEFAULT_VOICE_DIR = Path(os.environ.get("SPP_DEFAULT_VOICE_DIR", "")).expanduser()
+PYTHON_CORE = Path(os.environ.get("SPP_PYTHON_CORE", sys.executable)).expanduser()
+QWEN_RUNTIME_DIR = RUNTIME_DIR / "qwen"
+QWEN_SITE = QWEN_RUNTIME_DIR / "site-packages"
+MEL_RUNTIME_DIR = RUNTIME_DIR / "mel"
+MEL_SITE = MEL_RUNTIME_DIR / "site-packages"
+
+QWEN_RUNTIME_PACKAGES = [
+    "mlx-audio==0.4.7",
+    "mlx==0.32.0",
+    "mlx-metal==0.32.0",
+    "mlx-lm==0.31.3",
+    "transformers==5.14.1",
+    "tokenizers==0.22.2",
+    "numpy==2.4.6",
+    "scipy==1.17.1",
+    "soundfile==0.14.0",
+]
+MEL_RUNTIME_PACKAGE = "audio-separator==0.47.0"
+# Mel-Deux uses the MDXC path. diffq is only required by Demucs in audio-separator,
+# so RC6 installs the needed all-wheel dependencies explicitly and skips diffq.
+MEL_RUNTIME_DEPS = [
+    "beartype>=0.18.5,<0.19.0", "einops>=0.7", "julius>=0.2",
+    "librosa>=0.10", "ml_collections", "numpy>=2", "onnx-weekly",
+    "onnx2torch-py313>=1.6", "packaging", "pydub>=0.25", "pyyaml",
+    "requests>=2", "resampy>=0.4", "rotary-embedding-torch>=0.6.1,<0.7.0",
+    "samplerate==0.1.0", "scipy>=1.13.0,<2.0.0", "six>=1.16",
+    "soundfile>=0.12", "torch>=2.13,<3", "tqdm", "imageio-ffmpeg==0.6.0",
+]
+PYPI_OFFICIAL = "https://pypi.org/simple"
+PYPI_MIRROR = "https://pypi.tuna.tsinghua.edu.cn/simple"
 
 QWEN_REPO = "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit"
 QWEN_REVISION = "e7dd0585652209fa0d7783659aad4e8a324de11c"
@@ -100,7 +131,7 @@ def locate_ffmpeg() -> Path | None:
         shutil.which("ffmpeg"),
         "/usr/local/bin/ffmpeg",
         "/opt/homebrew/bin/ffmpeg",
-        str(RUNTIME_DIR / "ffmpeg/ffmpeg"),
+        str(MEL_RUNTIME_DIR / "ffmpeg/ffmpeg"),
     ]
     for value in candidates:
         if value:
@@ -112,31 +143,44 @@ def locate_ffmpeg() -> Path | None:
 
 def cmd_doctor(_: argparse.Namespace) -> int:
     env = resolve_environment()
-    separator_bin = Path(env["separator_bin"])
     mel_model_dir = Path(env["mel_model_dir"])
-    qwen_python = Path(env["qwen_python"])
     qwen_model = Path(env["qwen_model"])
     asr_python = Path(env["asr_python"])
     asr_model = Path(env["asr_model"])
+
     checks = {
+        "bundled_python_core": PYTHON_CORE.is_file() and os.access(PYTHON_CORE, os.X_OK),
         "format_converter_binary": FORMAT_BIN.is_file() and os.access(FORMAT_BIN, os.X_OK),
-        "separator_binary": separator_bin.is_file() and os.access(separator_bin, os.X_OK),
+        "qwen_runtime": bool(env["qwen_runtime_installed"]),
+        "qwen_model": qwen_model.is_dir(),
+        "qwen_bridge": BRIDGE.is_file(),
+        "mel_runtime": bool(env["separator_runtime_installed"]),
         "mel_model": (mel_model_dir / MEL_MODEL).is_file(),
         "mel_config": (mel_model_dir / "config_deux_becruily.yaml").is_file(),
         "mel_ffmpeg": locate_ffmpeg() is not None,
-        "qwen_python": qwen_python.is_file(),
-        "qwen_model": qwen_model.is_dir(),
-        "qwen_bridge": BRIDGE.is_file(),
-        "asr_python": asr_python.is_file(),
-        "asr_model": asr_model.exists(),
+        "asr_optional": asr_python.is_file() and asr_model.exists(),
     }
+    required = [
+        "bundled_python_core",
+        "format_converter_binary",
+        "qwen_runtime",
+        "qwen_model",
+        "qwen_bridge",
+        "mel_runtime",
+        "mel_model",
+        "mel_config",
+        "mel_ffmpeg",
+    ]
+    core_ready = checks["bundled_python_core"] and checks["format_converter_binary"]
     return emit({
         "ok": True,
-        "ready": all(checks.values()),
+        "core_ready": core_ready,
+        "ready": all(checks[key] for key in required),
         "checks": checks,
         "paths": {
             "data": str(DATA_DIR), "cache": str(CACHE_DIR), "voices": str(VOICE_DIR),
             "models": str(MODEL_DIR), "runtime": str(RUNTIME_DIR),
+            "python_core": str(PYTHON_CORE),
             "qwen_model": str(qwen_model), "mel_model_dir": str(mel_model_dir),
             "ffmpeg": str(locate_ffmpeg() or ""),
         },
@@ -172,30 +216,40 @@ def cmd_separate(args: argparse.Namespace) -> int:
     if not src.is_file():
         return emit({"ok": False, "error": f"文件不存在：{src}"}, 2)
     env = resolve_environment()
-    separator_bin = Path(env["separator_bin"])
     mel_model_dir = Path(env["mel_model_dir"])
-    if not separator_bin.is_file():
-        return emit({"ok": False, "error": f"分离器不存在：{separator_bin}"}, 3)
+    if not env["separator_runtime_installed"]:
+        return emit({"ok": False, "error": "Mel Runtime 未安装，请先在“模型与环境”中安装运行环境。"}, 3)
 
     out_dir = Path(args.output_dir).expanduser() if args.output_dir else src.parent / "SPP Audio" / src.stem
     out_dir.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix="mel-", dir=CACHE_DIR))
     fmt = args.format.upper()
     ext = "." + fmt.lower().replace("mp3", "mp3")
-    cmd = [
-        str(separator_bin), "-m", MEL_MODEL,
+
+    base_args = [
+        "-m", MEL_MODEL,
         "--model_file_dir", str(mel_model_dir),
         "--output_dir", str(tmp), "--output_format", fmt,
     ]
     if fmt == "MP3":
-        cmd += ["--output_bitrate", args.bitrate]
-    cmd.append(str(src))
+        base_args += ["--output_bitrate", args.bitrate]
+    base_args.append(str(src))
+
+    mel_env = {}
+    if env["separator_source"] == "linked":
+        cmd = [str(env["separator_bin"])] + base_args
+    else:
+        cmd = [str(PYTHON_CORE), str(MEL_BRIDGE)] + base_args
+        mel_env["PYTHONPATH"] = str(env["mel_site"])
+        mel_env["PYTHONNOUSERSITE"] = "1"
+
     try:
         ffmpeg = locate_ffmpeg()
         mel_path = "/usr/bin:/bin:/usr/sbin:/sbin"
         if ffmpeg:
             mel_path = str(ffmpeg.parent) + ":" + mel_path
-        proc = run_capture(cmd, {"PATH": mel_path})
+        mel_env["PATH"] = mel_path
+        proc = run_capture(cmd, mel_env)
         if proc.returncode != 0:
             msg = (proc.stderr or proc.stdout or "Mel-Deux 分离失败").strip()
             return emit({"ok": False, "error": msg[-2000:]}, 4)
@@ -221,12 +275,13 @@ def cmd_separate(args: argparse.Namespace) -> int:
 def bridge_clone(ref_audio: Path, text: str, ref_text: str, output_dir: Path,
                  temperature: float, top_p: float, top_k: int, repetition_penalty: float) -> dict:
     env_cfg = resolve_environment()
-    qwen_python = Path(env_cfg["qwen_python"])
     qwen_model = Path(env_cfg["qwen_model"])
-    if not qwen_python.is_file():
-        raise RuntimeError(f"Qwen 运行环境不存在：{qwen_python}")
+    if not env_cfg["qwen_runtime_installed"]:
+        raise RuntimeError("Qwen Runtime 未安装，请先在“模型与环境”中安装运行环境。")
     if not qwen_model.is_dir():
         raise RuntimeError(f"Qwen 模型不存在：{qwen_model}")
+
+    qwen_python = Path(env_cfg["qwen_python"])
     cmd = [
         str(qwen_python), str(BRIDGE),
         "--ref-audio", str(ref_audio), "--text", text,
@@ -236,11 +291,17 @@ def bridge_clone(ref_audio: Path, text: str, ref_text: str, output_dir: Path,
     ]
     if ref_text:
         cmd += ["--ref-text", ref_text]
-    proc = run_capture(cmd, {
+
+    bridge_env = {
         "SPP_QWEN_MODEL": str(qwen_model),
         "SPP_ASR_PY": str(env_cfg["asr_python"]),
         "SPP_ASR_MODEL": str(env_cfg["asr_model"]),
-    })
+        "PYTHONNOUSERSITE": "1",
+    }
+    if env_cfg["qwen_python_source"] == "managed":
+        bridge_env["PYTHONPATH"] = str(env_cfg["qwen_site"])
+
+    proc = run_capture(cmd, bridge_env)
     marker = "RESULT_JSON="
     result_line = next((x for x in reversed(proc.stdout.splitlines()) if x.startswith(marker)), None)
     if proc.returncode != 0 or not result_line:
@@ -296,6 +357,10 @@ def _pick_path(configured: str | None, managed: Path) -> tuple[Path, str]:
     return managed, "missing"
 
 
+def _marker_exists(folder: Path) -> bool:
+    return (folder / "installed.json").is_file()
+
+
 def resolve_environment() -> dict:
     ensure_dirs()
     settings = load_settings()
@@ -309,14 +374,46 @@ def resolve_environment() -> dict:
         paths.get("mel_model_dir"),
         MODEL_DIR / "Mel-Deux",
     )
-    qwen_python, qwen_python_source = _pick_path(
-        paths.get("qwen_python"),
-        RUNTIME_DIR / "qwen/bin/python",
+
+    qwen_link = Path(paths["qwen_python"]).expanduser() if paths.get("qwen_python") else None
+    qwen_managed = (
+        _marker_exists(QWEN_RUNTIME_DIR)
+        and (QWEN_SITE / "mlx_audio").exists()
+        and PYTHON_CORE.is_file()
     )
-    separator_bin, separator_source = _pick_path(
-        paths.get("separator_bin"),
-        RUNTIME_DIR / "mel/bin/audio-separator",
+    if qwen_link and qwen_link.is_file():
+        qwen_python = qwen_link
+        qwen_python_source = "linked"
+        qwen_runtime_installed = True
+    elif qwen_managed:
+        qwen_python = PYTHON_CORE
+        qwen_python_source = "managed"
+        qwen_runtime_installed = True
+    else:
+        qwen_python = PYTHON_CORE
+        qwen_python_source = "missing"
+        qwen_runtime_installed = False
+
+    separator_link = Path(paths["separator_bin"]).expanduser() if paths.get("separator_bin") else None
+    mel_managed = (
+        _marker_exists(MEL_RUNTIME_DIR)
+        and (MEL_SITE / "audio_separator").exists()
+        and MEL_BRIDGE.is_file()
+        and PYTHON_CORE.is_file()
     )
+    if separator_link and separator_link.is_file():
+        separator_bin = separator_link
+        separator_source = "linked"
+        separator_runtime_installed = True
+    elif mel_managed:
+        separator_bin = MEL_BRIDGE
+        separator_source = "managed"
+        separator_runtime_installed = True
+    else:
+        separator_bin = MEL_BRIDGE
+        separator_source = "missing"
+        separator_runtime_installed = False
+
     asr_python, asr_python_source = _pick_path(
         paths.get("asr_python"),
         RUNTIME_DIR / "asr/bin/python",
@@ -325,6 +422,7 @@ def resolve_environment() -> dict:
         paths.get("asr_model"),
         MODEL_DIR / "whisper-turbo",
     )
+
     return {
         "qwen_model": qwen_model,
         "qwen_model_source": qwen_model_source,
@@ -332,8 +430,12 @@ def resolve_environment() -> dict:
         "mel_model_source": mel_source,
         "qwen_python": qwen_python,
         "qwen_python_source": qwen_python_source,
+        "qwen_runtime_installed": qwen_runtime_installed,
+        "qwen_site": QWEN_SITE,
         "separator_bin": separator_bin,
         "separator_source": separator_source,
+        "separator_runtime_installed": separator_runtime_installed,
+        "mel_site": MEL_SITE,
         "asr_python": asr_python,
         "asr_python_source": asr_python_source,
         "asr_model": asr_model,
@@ -347,6 +449,10 @@ def cmd_model_status(_: argparse.Namespace) -> int:
     payload = {
         "ok": True,
         "download_source": env["download_source"],
+        "python_core": {
+            "path": str(PYTHON_CORE),
+            "installed": PYTHON_CORE.is_file() and os.access(PYTHON_CORE, os.X_OK),
+        },
         "models": {
             "qwen": {
                 "repo": QWEN_REPO,
@@ -363,14 +469,14 @@ def cmd_model_status(_: argparse.Namespace) -> int:
         },
         "runtime": {
             "qwen_python": {
-                "path": str(env["qwen_python"]),
+                "path": str(env["qwen_python"] if env["qwen_python_source"] == "linked" else env["qwen_site"]),
                 "source": env["qwen_python_source"],
-                "installed": Path(env["qwen_python"]).is_file(),
+                "installed": bool(env["qwen_runtime_installed"]),
             },
             "separator": {
-                "path": str(env["separator_bin"]),
+                "path": str(env["separator_bin"] if env["separator_source"] == "linked" else env["mel_site"]),
                 "source": env["separator_source"],
-                "installed": Path(env["separator_bin"]).is_file(),
+                "installed": bool(env["separator_runtime_installed"]),
             },
         },
     }
@@ -408,6 +514,153 @@ def cmd_download_source(args: argparse.Namespace) -> int:
         "official": HF_OFFICIAL,
         "mirror": HF_MIRROR,
     })
+
+
+
+def _pypi_endpoint_order(source: str) -> list[str]:
+    if source == "mirror":
+        return [PYPI_MIRROR, PYPI_OFFICIAL]
+    if source == "official":
+        return [PYPI_OFFICIAL, PYPI_MIRROR]
+    return [PYPI_MIRROR, PYPI_OFFICIAL]
+
+
+def _verify_python_import(site: Path, imports: str) -> subprocess.CompletedProcess:
+    return run_capture(
+        [str(PYTHON_CORE), "-c", imports],
+        {
+            "PYTHONPATH": str(site),
+            "PYTHONNOUSERSITE": "1",
+        },
+    )
+
+
+def _runtime_installed(kind: str) -> bool:
+    if kind == "qwen":
+        return _marker_exists(QWEN_RUNTIME_DIR) and (QWEN_SITE / "mlx_audio").exists()
+    return _marker_exists(MEL_RUNTIME_DIR) and (MEL_SITE / "audio_separator").exists()
+
+
+def cmd_runtime_install(args: argparse.Namespace) -> int:
+    ensure_dirs()
+    kind = args.runtime
+    source = args.source or load_settings().get("download_source", "auto")
+
+    if not PYTHON_CORE.is_file() or not os.access(PYTHON_CORE, os.X_OK):
+        return emit({"ok": False, "error": "App 内置 Python Core 不可用。"}, 3)
+
+    if _runtime_installed(kind):
+        return emit({"ok": True, "runtime": kind, "installed": True, "already_installed": True})
+
+    if kind == "qwen":
+        packages = QWEN_RUNTIME_PACKAGES
+        install_steps = [(QWEN_RUNTIME_PACKAGES, False)]
+    else:
+        packages = [MEL_RUNTIME_PACKAGE] + MEL_RUNTIME_DEPS
+        # audio-separator declares diffq for its optional Demucs path. Mel-Deux is MDXC,
+        # so install the wheel itself without dependencies, then only the all-wheel MDXC deps.
+        install_steps = [([MEL_RUNTIME_PACKAGE], True), (MEL_RUNTIME_DEPS, False)]
+
+    final_dir = QWEN_RUNTIME_DIR if kind == "qwen" else MEL_RUNTIME_DIR
+    errors: list[str] = []
+
+    for endpoint in _pypi_endpoint_order(source):
+        temp_dir = Path(tempfile.mkdtemp(prefix=f"runtime-{kind}-", dir=CACHE_DIR))
+        site = temp_dir / "site-packages"
+        site.mkdir(parents=True, exist_ok=True)
+
+        print(json.dumps({
+            "event": "runtime_install_start",
+            "runtime": kind,
+            "index": endpoint,
+            "packages": packages,
+        }, ensure_ascii=False), flush=True)
+
+        install_failed = False
+        for step_packages, no_deps in install_steps:
+            cmd = [
+                str(PYTHON_CORE), "-m", "pip", "install",
+                "--disable-pip-version-check",
+                "--no-input",
+                "--only-binary=:all:",
+                "--break-system-packages",
+                "--target", str(site),
+                "--index-url", endpoint,
+            ]
+            if no_deps:
+                cmd.append("--no-deps")
+            cmd += step_packages
+
+            proc = run_capture(cmd, {
+                "PIP_CACHE_DIR": str(CACHE_DIR / "pip"),
+                "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+                "PYTHONNOUSERSITE": "1",
+            })
+            if proc.returncode != 0:
+                errors.append(f"{endpoint}: pip exit {proc.returncode}: {(proc.stderr or proc.stdout)[-800:]}")
+                install_failed = True
+                break
+
+        if install_failed:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            continue
+
+        if kind == "qwen":
+            verify = _verify_python_import(site, "import mlx_audio, mlx; print('QWEN_RUNTIME_OK')")
+            if verify.returncode != 0:
+                errors.append(f"{endpoint}: Qwen import failed: {(verify.stderr or verify.stdout)[-800:]}")
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                continue
+        else:
+            verify = _verify_python_import(
+                site,
+                "import audio_separator, imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())",
+            )
+            if verify.returncode != 0:
+                errors.append(f"{endpoint}: Mel import failed: {(verify.stderr or verify.stdout)[-800:]}")
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                continue
+
+            ffmpeg_path = Path(verify.stdout.strip().splitlines()[-1])
+            if not ffmpeg_path.is_file():
+                errors.append(f"{endpoint}: imageio-ffmpeg executable missing")
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                continue
+            ffmpeg_dir = temp_dir / "ffmpeg"
+            ffmpeg_dir.mkdir(parents=True, exist_ok=True)
+            ffmpeg_target = ffmpeg_dir / "ffmpeg"
+            shutil.copy2(ffmpeg_path, ffmpeg_target)
+            ffmpeg_target.chmod(0o755)
+
+        marker = {
+            "runtime": kind,
+            "installed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "python": str(PYTHON_CORE),
+            "packages": packages,
+            "source": endpoint,
+        }
+        (temp_dir / "installed.json").write_text(
+            json.dumps(marker, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        if final_dir.exists():
+            backup = CACHE_DIR / f"{kind}-runtime-previous-{int(time.time())}"
+            shutil.move(str(final_dir), str(backup))
+        shutil.move(str(temp_dir), str(final_dir))
+
+        print(json.dumps({
+            "event": "runtime_install_done",
+            "runtime": kind,
+            "path": str(final_dir),
+            "index": endpoint,
+        }, ensure_ascii=False), flush=True)
+        return emit({"ok": True, "runtime": kind, "installed": True, "path": str(final_dir)})
+
+    return emit({
+        "ok": False,
+        "error": "运行环境安装失败：" + " | ".join(errors[-2:]),
+    }, 4)
 
 
 def _endpoint_order(source: str) -> list[str]:
@@ -680,6 +933,11 @@ def build_parser() -> argparse.ArgumentParser:
     md.add_argument("model", choices=["qwen", "mel"])
     md.add_argument("--source", choices=["auto", "mirror", "official"])
     md.set_defaults(func=cmd_model_download)
+
+    ri = sub.add_parser("runtime-install")
+    ri.add_argument("runtime", choices=["qwen", "mel"])
+    ri.add_argument("--source", choices=["auto", "mirror", "official"])
+    ri.set_defaults(func=cmd_runtime_install)
     return p
 
 

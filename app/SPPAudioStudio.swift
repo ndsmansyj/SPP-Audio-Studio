@@ -1,4 +1,5 @@
 import SwiftUI
+import Foundation
 import AppKit
 import AVFoundation
 import UniformTypeIdentifiers
@@ -52,9 +53,84 @@ enum WorkerError: LocalizedError {
     }
 }
 
+
+final class DiagnosticLogger {
+    static let shared = DiagnosticLogger()
+
+    let directory: URL
+    private let maxBytes = 2 * 1024 * 1024
+    private let generations = 5
+    private let queue = DispatchQueue(label: "com.spp.audio-studio.logger")
+
+    private init() {
+        let base = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/SPP Audio Studio", isDirectory: true)
+        directory = base
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+    }
+
+    func sanitize(_ text: String) -> String {
+        var value = text.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+        if let regex = try? NSRegularExpression(pattern: #"/Users/[^/\s]+"#) {
+            let range = NSRange(value.startIndex..<value.endIndex, in: value)
+            value = regex.stringByReplacingMatches(in: value, range: range, withTemplate: "~")
+        }
+        if let regex = try? NSRegularExpression(pattern: #"~/[^\s\"']+"#) {
+            let range = NSRange(value.startIndex..<value.endIndex, in: value)
+            value = regex.stringByReplacingMatches(in: value, range: range, withTemplate: "~/<redacted>")
+        }
+        return value
+    }
+
+    func append(_ file: String, _ message: String) {
+        queue.async {
+            let url = self.directory.appendingPathComponent(file)
+            self.rotateIfNeeded(url)
+            let formatter = ISO8601DateFormatter()
+            let line = "[\(formatter.string(from: Date()))] \(self.sanitize(message))\n"
+            guard let data = line.data(using: .utf8) else { return }
+            if !FileManager.default.fileExists(atPath: url.path) {
+                FileManager.default.createFile(atPath: url.path, contents: data)
+                return
+            }
+            do {
+                let handle = try FileHandle(forWritingTo: url)
+                try handle.seekToEnd()
+                try handle.write(contentsOf: data)
+                try handle.close()
+            } catch {}
+        }
+    }
+
+    func tail(_ file: String, lines: Int = 20) -> [String] {
+        let url = directory.appendingPathComponent(file)
+        guard let data = try? Data(contentsOf: url),
+              let text = String(data: data.suffix(64 * 1024), encoding: .utf8) else { return [] }
+        return Array(text.split(separator: "\n").suffix(lines)).map(String.init)
+    }
+
+    private func rotateIfNeeded(_ url: URL) {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attrs[.size] as? NSNumber,
+              size.intValue >= maxBytes else { return }
+        for index in stride(from: generations - 1, through: 1, by: -1) {
+            let src = URL(fileURLWithPath: url.path + ".\(index)")
+            let dst = URL(fileURLWithPath: url.path + ".\(index + 1)")
+            if FileManager.default.fileExists(atPath: src.path) {
+                try? FileManager.default.removeItem(at: dst)
+                try? FileManager.default.moveItem(at: src, to: dst)
+            }
+        }
+        let first = URL(fileURLWithPath: url.path + ".1")
+        try? FileManager.default.removeItem(at: first)
+        try? FileManager.default.moveItem(at: url, to: first)
+    }
+}
+
 final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published var tasks: [TaskItem] = []
     @Published var doctorChecks: [String: Bool] = [:]
+    @Published var coreReady = false
     @Published var doctorOK = false
     @Published var voices: [VoiceTemplate] = []
     @Published var voiceBusy = false
@@ -73,15 +149,27 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published var separatorInstalled = false
     @Published var separatorSource = "missing"
     @Published var modelBusy: String?
+    @Published var runtimeBusy: String?
     @Published var modelStatusMessage = ""
 
     @Published var previewPath: String?
     @Published var previewIsPlaying = false
     @Published var previewStatus = ""
+
+    @Published var lastError = ""
+    @Published var lastTaskSummary = "尚无任务"
+    @Published var diagnosticStatus = ""
+
     private var previewPlayer: AVAudioPlayer?
+    private let logger = DiagnosticLogger.shared
 
     override init() {
         super.init()
+        logger.append("app.log", "app launch version=\(appVersion)")
+    }
+
+    private var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
     }
 
     private var workerURL: URL? {
@@ -96,19 +184,51 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
         Bundle.main.resourceURL?.appendingPathComponent("default_voice", isDirectory: true)
     }
 
+    private var bundledPythonCore: URL? {
+        Bundle.main.resourceURL?.appendingPathComponent("runtime/python/bin/python3.11")
+    }
+
     private func workerEnvironment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         env.removeValue(forKey: "PYTHONPATH")
+        env["PYTHONNOUSERSITE"] = "1"
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         if let converter = bundledFormatConverter { env["SPP_FORMAT_BIN"] = converter.path }
         if let voice = bundledDefaultVoice { env["SPP_DEFAULT_VOICE_DIR"] = voice.path }
+        if let python = bundledPythonCore {
+            env["SPP_PYTHON_CORE"] = python.path
+            env["PATH"] = python.deletingLastPathComponent().path + ":/usr/bin:/bin:/usr/sbin:/sbin"
+        }
         return env
     }
-    private func runWorkerSync(_ arguments: [String]) throws -> [String: Any] {
-        guard let worker = workerURL else {
-            throw WorkerError.message("App 内缺少统一 Worker")
+    private func recordError(_ message: String, context: String) {
+        let safe = logger.sanitize(message)
+        logger.append("app.log", "error context=\(context) message=\(safe)")
+        DispatchQueue.main.async {
+            self.lastError = safe
         }
+    }
+
+    private func runWorkerSync(_ arguments: [String]) throws -> [String: Any] {
+        let command = arguments.first ?? "unknown"
+        let logFile = (command.contains("download") || command.contains("runtime-install")) ? "install.log" : "worker.log"
+
+        guard let worker = workerURL else {
+            let message = "App 内缺少统一 Worker"
+            recordError(message, context: command)
+            throw WorkerError.message(message)
+        }
+        guard let python = bundledPythonCore,
+              FileManager.default.isExecutableFile(atPath: python.path) else {
+            let message = "App 内缺少 Python Core"
+            recordError(message, context: command)
+            throw WorkerError.message(message)
+        }
+
+        logger.append(logFile, "worker start command=\(command)")
+
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.executableURL = python
         process.arguments = [worker.path] + arguments
         process.environment = workerEnvironment()
 
@@ -116,7 +236,16 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
         let stderr = Pipe()
         process.standardOutput = stdout
         process.standardError = stderr
-        try process.run()
+
+        do {
+            try process.run()
+        } catch {
+            let message = "Worker 启动失败：\(error.localizedDescription)"
+            recordError(message, context: command)
+            logger.append(logFile, message)
+            throw WorkerError.message(message)
+        }
+
         process.waitUntilExit()
 
         let outData = stdout.fileHandleForReading.readDataToEndOfFile()
@@ -129,11 +258,20 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
            let data = line.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             if (json["ok"] as? Bool) == false {
-                throw WorkerError.message((json["error"] as? String) ?? "任务失败")
+                let message = (json["error"] as? String) ?? "任务失败"
+                recordError(message, context: command)
+                logger.append(logFile, "worker failed command=\(command) exit=\(process.terminationStatus) message=\(message)")
+                throw WorkerError.message(message)
             }
+            logger.append(logFile, "worker done command=\(command) exit=\(process.terminationStatus)")
             return json
         }
-        throw WorkerError.message((errText + "\n" + outText).trimmingCharacters(in: .whitespacesAndNewlines))
+
+        let combined = (errText + "\n" + outText).trimmingCharacters(in: .whitespacesAndNewlines)
+        let message = combined.isEmpty ? "Worker 返回异常（exit \(process.terminationStatus)）" : combined
+        recordError(message, context: command)
+        logger.append(logFile, "worker parse failure command=\(command) exit=\(process.terminationStatus) message=\(message)")
+        throw WorkerError.message(message)
     }
 
     private func mutateTask(_ id: UUID, status: String, detail: String, output: String? = nil) {
@@ -159,6 +297,9 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
         }
         DispatchQueue.global(qos: .userInitiated).async {
             for (url, id) in items {
+                let summary = "\(mode.rawValue) · .\(url.pathExtension.lowercased())"
+                DispatchQueue.main.async { self.lastTaskSummary = summary + " · 处理中" }
+                self.logger.append("app.log", "task start mode=\(mode.rawValue) ext=.\(url.pathExtension.lowercased())")
                 self.mutateTask(id, status: "处理中", detail: "正在执行…")
                 do {
                     let output = try self.processOne(
@@ -168,9 +309,14 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
                         customOutputDir: customOutputDir,
                         keep: keep
                     )
+                    DispatchQueue.main.async { self.lastTaskSummary = summary + " · 完成" }
+                    self.logger.append("app.log", "task done mode=\(mode.rawValue) ext=.\(url.pathExtension.lowercased())")
                     self.mutateTask(id, status: "完成", detail: "已完成", output: output)
                 } catch {
-                    self.mutateTask(id, status: "失败", detail: error.localizedDescription)
+                    let message = self.logger.sanitize(error.localizedDescription)
+                    DispatchQueue.main.async { self.lastTaskSummary = summary + " · 失败" }
+                    self.recordError(message, context: "task \(mode.rawValue)")
+                    self.mutateTask(id, status: "失败", detail: message)
                 }
             }
         }
@@ -237,10 +383,12 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
                 let checks = json["checks"] as? [String: Bool] ?? [:]
                 DispatchQueue.main.async {
                     self.doctorChecks = checks
+                    self.coreReady = json["core_ready"] as? Bool ?? false
                     self.doctorOK = json["ready"] as? Bool ?? false
                 }
             } catch {
                 DispatchQueue.main.async {
+                    self.coreReady = false
                     self.doctorOK = false
                     self.doctorChecks = ["worker": false]
                 }
@@ -323,6 +471,34 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
                     self.modelBusy = nil
                     self.modelStatusMessage = error.localizedDescription
                 }
+            }
+        }
+    }
+
+    func installRuntime(_ kind: String) {
+        guard runtimeBusy == nil else { return }
+        runtimeBusy = kind
+        let label = kind == "qwen" ? "Qwen / MLX" : "Mel Separator"
+        modelStatusMessage = "正在安装 \(label) 运行环境…"
+        logger.append("install.log", "runtime install requested kind=\(kind)")
+        let source = downloadSource
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                _ = try self.runWorkerSync(["runtime-install", kind, "--source", source])
+                DispatchQueue.main.async {
+                    self.runtimeBusy = nil
+                    self.modelStatusMessage = "\(label) 运行环境安装完成"
+                }
+                self.logger.append("install.log", "runtime install completed kind=\(kind)")
+                self.refreshModels()
+                self.refreshDoctor()
+            } catch {
+                let message = self.logger.sanitize(error.localizedDescription)
+                DispatchQueue.main.async {
+                    self.runtimeBusy = nil
+                    self.modelStatusMessage = message
+                }
+                self.recordError(message, context: "runtime-install \(kind)")
             }
         }
     }
@@ -470,6 +646,85 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
             self.previewIsPlaying = false
             self.previewStatus = flag ? "试听完成" : "试听中断"
         }
+    }
+
+    private func copyToPasteboard(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    private var architectureName: String {
+        #if arch(arm64)
+        return "arm64 / Apple Silicon"
+        #else
+        return "unknown"
+        #endif
+    }
+
+    func makeDiagnosticReport() -> String {
+        let pythonOK = bundledPythonCore.map { FileManager.default.isExecutableFile(atPath: $0.path) } ?? false
+        let recent = (
+            logger.tail("app.log", lines: 8) +
+            logger.tail("worker.log", lines: 8) +
+            logger.tail("install.log", lines: 8)
+        ).suffix(18).joined(separator: "\n")
+
+        return """
+        SPP Audio Studio Diagnostic Report
+        Version: \(appVersion)
+        macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)
+        Architecture: \(architectureName)
+
+        Core:
+        Bundled Python Core: \(pythonOK ? "OK" : "MISSING")
+        Environment Ready: \(doctorOK ? "YES" : "NO")
+        Format Converter: \((doctorChecks["format_converter_binary"] ?? false) ? "OK" : "MISSING")
+
+        Qwen:
+        Model: \(qwenInstalled ? "Installed" : "Missing")
+        Runtime: \(qwenRuntimeInstalled ? "Installed" : "Missing")
+        Runtime Source: \(qwenRuntimeSource)
+
+        Mel-Deux:
+        Model: \(melInstalled ? "Installed" : "Missing")
+        Runtime: \(separatorInstalled ? "Installed" : "Missing")
+        Runtime Source: \(separatorSource)
+        FFmpeg: \((doctorChecks["mel_ffmpeg"] ?? false) ? "OK" : "Missing")
+
+        Last Task:
+        \(lastTaskSummary)
+
+        Last Error:
+        \(lastError.isEmpty ? "None" : logger.sanitize(lastError))
+
+        Recent Log:
+        \(recent.isEmpty ? "No recent log entries." : recent)
+        """
+    }
+
+    func copyDiagnosticReport() {
+        copyToPasteboard(makeDiagnosticReport())
+        diagnosticStatus = "诊断报告已复制"
+        logger.append("app.log", "diagnostic report copied")
+    }
+
+    func copyLastError() {
+        let text = lastError.isEmpty ? "SPP Audio Studio：暂无最近错误。" : logger.sanitize(lastError)
+        copyToPasteboard(text)
+        diagnosticStatus = "最近错误已复制"
+        logger.append("app.log", "last error copied")
+    }
+
+    func copyErrorText(_ text: String) {
+        copyToPasteboard(logger.sanitize(text))
+        diagnosticStatus = "错误信息已复制"
+        logger.append("app.log", "task error copied")
+    }
+
+    func openLogFolder() {
+        try? FileManager.default.createDirectory(at: logger.directory, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(logger.directory)
+        diagnosticStatus = "已打开日志文件夹"
     }
 
     func reveal(_ path: String?) {
@@ -899,6 +1154,15 @@ struct TaskListView: View {
                     }
                     Spacer()
                     Text(task.status).font(.caption).foregroundStyle(.secondary)
+                    if task.status == "失败" {
+                        Button {
+                            state.copyErrorText(task.detail)
+                        } label: {
+                            Image(systemName: "doc.on.doc")
+                        }
+                        .buttonStyle(.plain)
+                        .help("复制错误")
+                    }
                     if task.outputPath != nil {
                         Button {
                             state.togglePreview(task.outputPath)
@@ -1233,16 +1497,16 @@ struct EnvironmentView: View {
     @EnvironmentObject var state: AppState
 
     private let labels: [String: String] = [
+        "bundled_python_core": "App 内置 Python Core",
         "format_converter_binary": "本地格式转换器",
-        "separator_binary": "Mel-Deux 分离引擎",
-        "mel_model": "Mel-Deux 模型",
-        "mel_config": "Mel-Deux 配置",
-        "qwen_python": "Qwen Python 环境",
+        "qwen_runtime": "Qwen / MLX Runtime",
         "qwen_model": "Qwen3-TTS 模型",
         "qwen_bridge": "Qwen 桥接层",
+        "mel_runtime": "Mel Separator Runtime",
+        "mel_model": "Mel-Deux 模型",
+        "mel_config": "Mel-Deux 配置",
         "mel_ffmpeg": "Mel-Deux FFmpeg",
-        "asr_python": "Whisper ASR 环境",
-        "asr_model": "Whisper 模型"
+        "asr_optional": "Whisper 自动转写（可选）"
     ]
 
     var body: some View {
@@ -1258,10 +1522,12 @@ struct EnvironmentView: View {
                 }
 
                 HStack(spacing: 10) {
-                    Image(systemName: state.doctorOK ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
-                        .foregroundStyle(state.doctorOK ? .green : .orange)
+                    Image(systemName: state.doctorOK ? "checkmark.seal.fill" : (state.coreReady ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"))
+                        .foregroundStyle(state.doctorOK ? .green : (state.coreReady ? .green : .orange))
                         .font(.title2)
-                    Text(state.doctorOK ? "当前环境全部就绪" : "有组件需要处理")
+                    Text(state.doctorOK
+                         ? "当前环境全部就绪"
+                         : (state.coreReady ? "App 核心已就绪，AI 组件待安装" : "核心组件需要处理"))
                         .font(.headline)
                     Spacer()
                     Picker("下载源", selection: Binding(
@@ -1307,6 +1573,30 @@ struct EnvironmentView: View {
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
                 }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("诊断与日志").font(.headline)
+                        Spacer()
+                        if !state.diagnosticStatus.isEmpty {
+                            Text(state.diagnosticStatus)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Text("群测遇到问题时，优先点“复制诊断报告”直接发给开发者。报告默认隐藏用户名、完整路径和声音克隆文案。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 10) {
+                        Button("复制诊断报告") { state.copyDiagnosticReport() }
+                            .buttonStyle(.borderedProminent)
+                        Button("复制最近错误") { state.copyLastError() }
+                            .disabled(state.lastError.isEmpty)
+                        Button("打开日志文件夹") { state.openLogFolder() }
+                    }
+                }
+                .padding(16)
+                .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
 
                 Divider()
 
@@ -1396,7 +1686,7 @@ struct EnvironmentView: View {
     }
 
     private var runtimeCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("推理运行环境").font(.headline)
                 Spacer()
@@ -1404,17 +1694,54 @@ struct EnvironmentView: View {
                     .font(.caption)
                     .foregroundStyle((state.qwenRuntimeInstalled && state.separatorInstalled) ? .green : .orange)
             }
-            Text("Qwen 与 Mel-Deux 除了模型，还需要本地推理环境。你的机器当前直接链接现有环境；通用版会把这一层做成 App 管理的 Runtime，一次安装后离线使用。")
+
+            Text("RC6 自带 Python Core，不需要 Xcode Command Line Tools。Qwen / Mel 的推理依赖可以在这里一次安装，安装完成后离线使用。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            HStack(spacing: 18) {
+
+            HStack {
                 Label("Qwen / MLX：\(sourceLabel(state.qwenRuntimeSource))",
                       systemImage: state.qwenRuntimeInstalled ? "checkmark.circle.fill" : "xmark.circle")
+                Spacer()
+                if !state.qwenRuntimeInstalled {
+                    Button {
+                        state.installRuntime("qwen")
+                    } label: {
+                        if state.runtimeBusy == "qwen" {
+                            ProgressView().controlSize(.small)
+                            Text("安装中…")
+                        } else {
+                            Text("安装 Qwen Runtime")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(state.runtimeBusy != nil)
+                }
+            }
+
+            HStack {
                 Label("Mel Separator：\(sourceLabel(state.separatorSource))",
                       systemImage: state.separatorInstalled ? "checkmark.circle.fill" : "xmark.circle")
+                Spacer()
+                if !state.separatorInstalled {
+                    Button {
+                        state.installRuntime("mel")
+                    } label: {
+                        if state.runtimeBusy == "mel" {
+                            ProgressView().controlSize(.small)
+                            Text("安装中…")
+                        } else {
+                            Text("安装 Mel Runtime")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(state.runtimeBusy != nil)
+                }
             }
-            .font(.caption)
-            .foregroundStyle(.secondary)
+
+            Text("运行环境安装会使用 App 内置 Python 和预编译包，不要求用户安装 Homebrew、Xcode 或系统 Python。")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
         .padding(16)
         .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))

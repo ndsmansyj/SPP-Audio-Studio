@@ -1,6 +1,6 @@
 # SPP Audio Studio
 
-<img src="assets/icon/pelican.svg" width="128" alt="SPP Audio Studio pelican icon">
+<img src="assets/icon/pixel_icon_1024.png" width="160" alt="SPP Audio Studio pixel-art icon">
 
 一个面向 Apple Silicon Mac 的本地音频工作台，把三件高频杂活收进一个原生 macOS App：
 
@@ -10,7 +10,7 @@
 - 常用人声模板
 - 处理结果一键试听
 
-> 当前版本：0.2.0-rc5（公开群测）
+> 当前版本：0.2.0-rc6（干净 Mac 群测）
 
 ## 设计目标
 
@@ -95,13 +95,25 @@ SPP Audio Studio 不是 DAW，也不做复杂波形编辑。它只想把常用�
 
 如果你本机已经有模型，也可以直接“链接本地”，不会复制模型文件。
 
-### 当前 RC 的已知限制
+### RC6：干净 Mac 运行环境
 
-模型下载已经做进 App，但 Qwen / Mel 的完全自包含 Runtime 还在继续打磨。也就是说，在一台从没装过相关 Python / MLX / audio-separator 环境的全新 Mac 上，AI 模块有可能显示 Runtime 缺失。
+RC6 已把 Python Core 直接打进 App。普通用户不需要安装：
 
-这正是这轮群测最重要的测试项之一。格式转换本身是原生 Swift，不依赖 Python Runtime。
+- Xcode / Command Line Tools
+- Homebrew
+- 系统 Python
 
-如果你是干净 Mac，请把“模型与环境”页面截图和错误原文发到 Issues。
+Qwen 与 Mel 的“模型”和“运行环境”分开管理：模型仍通过 Hugging Face / 镜像下载；推理 Runtime 可以在“模型与环境”页面直接安装。Runtime 安装只使用预编译包，不要求本机编译。
+
+干净 Mac 首次使用 AI 功能时建议按顺序：
+
+1. 安装对应 Runtime
+2. 下载对应模型
+3. 回到人声分离 / 声音克隆使用
+
+如果安装失败，可以直接点击“复制诊断报告”发到 Issue 或群里，不需要打开 Terminal。
+
+当前仍处于 RC 群测阶段，最重要的测试项就是不同 Apple Silicon / macOS 组合上的首次 Runtime 安装。新建声音模板时如果把参考文本留空，自动语音转写属于可选能力；默认内置模板不依赖这一步。
 
 ## 隐私
 
@@ -159,8 +171,10 @@ SPP Audio Studio 自身代码使用 MIT License。
 - 人声分离三种输出是否正常
 - 声音克隆是否正常
 - 模型下载是否正常
-- 干净 Mac 是否提示 Runtime 缺失
+- 干净 Mac 是否能直接启动，不弹 Xcode / python3 安装提示
+- Qwen / Mel Runtime 是否能在 App 内安装
 - 试听是否正常
+- “复制诊断报告”是否能直接粘贴反馈
 
 详细测试清单见 docs/TESTING.md。
 
