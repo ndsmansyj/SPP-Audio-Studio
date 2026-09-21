@@ -1,0 +1,38 @@
+# macOS
+.DS_Store
+.AppleDouble
+
+# Build / release artifacts
+build/
+dist/
+release/
+*.app/
+*.dmg
+*.zip
+
+# Test outputs
+tests/
+__pycache__/
+*.pyc
+*.part
+
+# Local runtime / models / caches
+Models/
+Runtime/
+.cache/
+.venv/
+venv/
+models/
+runtime/
+
+# Local project notes - not part of the public repo
+STATUS.md
+AGENT_RULES.md
+
+# User data / generated outputs
+Voices/
+History/
+Outputs/
+SPP Audio/
+history.jsonl
+settings.json

@@ -1,0 +1,74 @@
+name: Bug / 群测问题
+description: 报告启动、转换、分离、克隆、模型下载或试听问题
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢帮忙测试。请不要上传私人参考音、商业项目素材或受版权保护的整首歌曲。
+  - type: input
+    id: version
+    attributes:
+      label: SPP Audio Studio 版本
+      placeholder: 例如 0.2.0-rc4
+    validations:
+      required: true
+  - type: input
+    id: mac
+    attributes:
+      label: Mac 芯片 / 机型
+      placeholder: 例如 M1 Max MacBook Pro
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS 版本
+      placeholder: 例如 macOS 26.x
+    validations:
+      required: true
+  - type: dropdown
+    id: clean
+    attributes:
+      label: 是否是干净 Mac
+      description: 之前是否安装过 Qwen / MLX / audio-separator / Mel-Deux 等运行环境？
+      options:
+        - 是，基本没有相关环境
+        - 否，之前装过相关环境
+        - 不确定
+    validations:
+      required: true
+  - type: dropdown
+    id: module
+    attributes:
+      label: 出问题的模块
+      options:
+        - App 启动 / Gatekeeper
+        - NCM 转换
+        - 人声分离
+        - 声音克隆
+        - 模型下载
+        - Runtime / 模型与环境
+        - 音频试听
+        - 拖拽 / 输出目录
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: 1. 打开...
+2. 拖入...
+3. 点击...
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: 错误原文 / 截图
+      description: 尽量贴完整错误文字；截图可直接拖入。
+    validations:
+      required: true
