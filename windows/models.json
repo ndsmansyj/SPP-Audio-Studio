@@ -1,0 +1,38 @@
+{
+  "qwen": {
+    "repo": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+    "revision": "main",
+    "files": {
+      "config.json": 4494,
+      "generation_config.json": 245,
+      "merges.txt": 1671839,
+      "model.safetensors": 3857413744,
+      "preprocessor_config.json": 127,
+      "speech_tokenizer/config.json": 2336,
+      "speech_tokenizer/configuration.json": 76,
+      "speech_tokenizer/model.safetensors": 682293092,
+      "speech_tokenizer/preprocessor_config.json": 234,
+      "tokenizer_config.json": 7344,
+      "vocab.json": 2776833
+    }
+  },
+  "mel": {
+    "repo": "becruily/mel-band-roformer-deux",
+    "revision": "2da74427d682a3df47a774378fc24d7a1a0cdaad",
+    "files": {
+      "becruily_deux.ckpt": 435006815,
+      "config_deux_becruily.yaml": 1175
+    }
+  },
+  "whisper": {
+    "repo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+    "revision": "main",
+    "files": {
+      "config.json": 2263,
+      "model.bin": 1617884929,
+      "preprocessor_config.json": 340,
+      "tokenizer.json": 2710337,
+      "vocabulary.json": 1068114
+    }
+  }
+}
