@@ -33,9 +33,9 @@ Qwen local inference uses `mlx-audio`.
 - License: MIT
 - Upstream: `Blaizzy/mlx-audio`
 
-## NCM conversion
+## Local special-format conversion
 
-The native Swift NCM converter in `ncm/main.swift` is a local reimplementation of the commonly documented NCM container/decryption flow and was validated against existing ncmdump implementations.
+The native Swift converter in `format_converter/main.swift` implements the locally stored special-format conversion flow supported by this app and was validated against existing open-source implementations.
 
 Related/open-source references include:
 - `taurusxin/ncmdump` — MIT

@@ -23,8 +23,8 @@ RUNTIME_DIR = DATA_DIR / "Runtime"
 HISTORY_FILE = DATA_DIR / "history.jsonl"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 
-BUNDLED_NCM_BIN = Path(__file__).resolve().parent.parent / "bin" / "ncm_converter"
-NCM_BIN = Path(os.environ.get("SPP_NCM_BIN", str(BUNDLED_NCM_BIN))).expanduser()
+BUNDLED_FORMAT_BIN = Path(__file__).resolve().parent.parent / "bin" / "format_converter"
+FORMAT_BIN = Path(os.environ.get("SPP_FORMAT_BIN", str(BUNDLED_FORMAT_BIN))).expanduser()
 MEL_MODEL = os.environ.get("SPP_MEL_MODEL", "becruily_deux.ckpt")
 BRIDGE = Path(__file__).with_name("qwen_bridge.py")
 DEFAULT_VOICE_DIR = Path(os.environ.get("SPP_DEFAULT_VOICE_DIR", "")).expanduser()
@@ -119,7 +119,7 @@ def cmd_doctor(_: argparse.Namespace) -> int:
     asr_python = Path(env["asr_python"])
     asr_model = Path(env["asr_model"])
     checks = {
-        "ncm_binary": NCM_BIN.is_file() and os.access(NCM_BIN, os.X_OK),
+        "format_converter_binary": FORMAT_BIN.is_file() and os.access(FORMAT_BIN, os.X_OK),
         "separator_binary": separator_bin.is_file() and os.access(separator_bin, os.X_OK),
         "mel_model": (mel_model_dir / MEL_MODEL).is_file(),
         "mel_config": (mel_model_dir / "config_deux_becruily.yaml").is_file(),
@@ -148,14 +148,14 @@ def cmd_convert(args: argparse.Namespace) -> int:
         return emit({"ok": False, "error": f"文件不存在：{src}"}, 2)
     if src.suffix.lower() != ".ncm":
         return emit({"ok": False, "error": "convert 当前只接受 .ncm"}, 2)
-    if not NCM_BIN.is_file():
-        return emit({"ok": False, "error": f"NCM 转换器不存在：{NCM_BIN}"}, 3)
+    if not FORMAT_BIN.is_file():
+        return emit({"ok": False, "error": f"格式转换器不存在：{FORMAT_BIN}"}, 3)
 
     out_root = Path(args.output_dir).expanduser() if args.output_dir else src.parent / "SPP Audio"
     out_root.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix="ncm-", dir=CACHE_DIR))
     try:
-        proc = run_capture([str(NCM_BIN), str(src), "--out", str(tmp)])
+        proc = run_capture([str(FORMAT_BIN), str(src), "--out", str(tmp)])
         produced = [p for p in tmp.iterdir() if p.is_file() and p.suffix.lower() in {".mp3", ".flac"}]
         if proc.returncode != 0 or not produced:
             msg = (proc.stderr or proc.stdout or "NCM 转换失败").strip()

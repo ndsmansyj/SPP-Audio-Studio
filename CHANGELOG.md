@@ -1,12 +1,12 @@
 # Changelog
 
-## 0.2.0-rc4 — 2026-09-21
+## 0.2.0-rc5 — 2026-09-21
 
-First public group-test release.
+Public group-test release with the pelican app icon and generic public-facing format-conversion wording.
 
 ### Added
 - Native macOS SwiftUI shell for Apple Silicon.
-- NCM batch conversion to original MP3/FLAC.
+- Local special-format conversion to original MP3/FLAC.
 - Mel-Deux vocal/instrumental separation.
 - Separation modes: instrumental only, vocals only, or both.
 - Qwen3-TTS local voice cloning.

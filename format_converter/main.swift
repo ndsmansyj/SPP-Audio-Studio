@@ -7,7 +7,7 @@ import CommonCrypto
 import UniformTypeIdentifiers
 
 // ============================================================
-// 网易云音乐转换器（Swift 原生版）
+// 本地特殊格式转换器（Swift 原生版）
 // 无参数 → 图形界面；带参数 → 命令行转换
 // ============================================================
 
@@ -169,7 +169,7 @@ func convertFile(src: URL, outDir: String, fmtChoice: String, skip: Bool) throws
 
 func runCLI(_ args: [String]) -> Int32 {
     var files: [String] = []
-    var outDir = (NSHomeDirectory() as NSString).appendingPathComponent("Music/网易云音乐/已转换")
+    var outDir = (NSHomeDirectory() as NSString).appendingPathComponent("Music/SPP Audio Studio/Converted")
     var fmt = "mp3"
     var i = 0
     while i < args.count {
@@ -278,7 +278,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 600),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
-        window.title = "网易云音乐转换"
+        window.title = "格式转换"
         window.center()
         window.setFrameAutosaveName("NcmConverter")
         window.contentView = buildUI()
@@ -303,7 +303,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         root.spacing = 10
         root.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
 
-        let title = makeLabel("♪ 网易云音乐转换器", 20, true)
+        let title = makeLabel("♪ 本地格式转换器", 20, true)
         root.addArrangedSubview(title)
         root.addArrangedSubview(makeLabel("把 .ncm 文件拖进来，一键转成 mp3 / flac", 12, false, .secondaryLabelColor))
 
@@ -345,7 +345,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         outRow.orientation = .horizontal
         outRow.spacing = 8
         outRow.addArrangedSubview(makeLabel("输出目录", 13))
-        outField = NSTextField(string: (NSHomeDirectory() as NSString).appendingPathComponent("Music/网易云音乐/已转换"))
+        outField = NSTextField(string: (NSHomeDirectory() as NSString).appendingPathComponent("Music/SPP Audio Studio/Converted"))
         outField.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
         let browseBtn = NSButton(title: "浏览…", target: self, action: #selector(browseOut))
         outRow.addArrangedSubview(outField)
@@ -454,7 +454,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.allowedContentTypes = [UTType(filenameExtension: "ncm") ?? .data]
-        panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory() + "/Music/网易云音乐")
+        panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory() + "/Music")
         if panel.runModal() == .OK {
             var added = 0
             for u in panel.urls { if addFile(u) { added += 1 } }
@@ -493,7 +493,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     @objc func openOutDir() {
         let d = outField.stringValue.isEmpty
-            ? (NSHomeDirectory() as NSString).appendingPathComponent("Music/网易云音乐/已转换")
+            ? (NSHomeDirectory() as NSString).appendingPathComponent("Music/SPP Audio Studio/Converted")
             : outField.stringValue
         try? FileManager.default.createDirectory(atPath: d, withIntermediateDirectories: true)
         NSWorkspace.shared.open(URL(fileURLWithPath: d))
@@ -508,7 +508,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             return
         }
         var outDir = outField.stringValue.trimmingCharacters(in: .whitespaces)
-        if outDir.isEmpty { outDir = (NSHomeDirectory() as NSString).appendingPathComponent("Music/网易云音乐/已转换") }
+        if outDir.isEmpty { outDir = (NSHomeDirectory() as NSString).appendingPathComponent("Music/SPP Audio Studio/Converted") }
         do {
             try FileManager.default.createDirectory(atPath: outDir, withIntermediateDirectories: true)
         } catch {
@@ -590,7 +590,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     func alert(_ msg: String, style: NSAlert.Style) {
         let a = NSAlert()
-        a.messageText = "网易云音乐转换"
+        a.messageText = "格式转换"
         a.informativeText = msg
         a.alertStyle = style
         a.addButton(withTitle: "好")

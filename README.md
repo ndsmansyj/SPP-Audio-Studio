@@ -1,14 +1,16 @@
 # SPP Audio Studio
 
+<img src="assets/icon/pelican.svg" width="128" alt="SPP Audio Studio pelican icon">
+
 一个面向 Apple Silicon Mac 的本地音频工作台，把三件高频杂活收进一个原生 macOS App：
 
-- 网易云 NCM 转换
+- 本地特殊格式转换
 - Mel-Deux 人声 / 伴奏分离
 - Qwen3-TTS 声音克隆
 - 常用人声模板
 - 处理结果一键试听
 
-> 当前版本：0.2.0-rc4（公开群测）
+> 当前版本：0.2.0-rc5（公开群测）
 
 ## 设计目标
 
@@ -24,9 +26,9 @@ SPP Audio Studio 不是 DAW，也不做复杂波形编辑。它只想把常用�
 
 ## 功能
 
-### 1. NCM 转换
+### 1. 特殊格式转换
 
-- 支持批量拖入 .ncm
+- 支持批量拖入受支持的本地特殊格式文件
 - 输出原始 MP3 / FLAC
 - 可选择输出到源文件旁边或自定义目录
 - 转换完成可直接试听
@@ -97,7 +99,7 @@ SPP Audio Studio 不是 DAW，也不做复杂波形编辑。它只想把常用�
 
 模型下载已经做进 App，但 Qwen / Mel 的完全自包含 Runtime 还在继续打磨。也就是说，在一台从没装过相关 Python / MLX / audio-separator 环境的全新 Mac 上，AI 模块有可能显示 Runtime 缺失。
 
-这正是这轮群测最重要的测试项之一。NCM 转换本身是原生 Swift，不依赖 Python Runtime。
+这正是这轮群测最重要的测试项之一。格式转换本身是原生 Swift，不依赖 Python Runtime。
 
 如果你是干净 Mac，请把“模型与环境”页面截图和错误原文发到 Issues。
 
@@ -136,7 +138,7 @@ SPP Audio Studio 自身代码使用 MIT License。
 
     app/                  SwiftUI macOS UI
     worker/               统一 Worker / Qwen bridge
-    ncm/                  原生 Swift NCM 转换器源码
+    format_converter/     原生 Swift 格式转换器源码
     assets/default_voice/ 默认演示人声模板
     scripts/              本机构建脚本
     docs/                 测试说明
@@ -153,7 +155,7 @@ SPP Audio Studio 自身代码使用 MIT License。
 
 - 首次启动是否成功
 - Finder 拖拽是否正常
-- NCM 转换是否正常
+- 特殊格式转换是否正常
 - 人声分离三种输出是否正常
 - 声音克隆是否正常
 - 模型下载是否正常

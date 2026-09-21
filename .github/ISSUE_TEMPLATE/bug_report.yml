@@ -12,7 +12,7 @@ body:
     id: version
     attributes:
       label: SPP Audio Studio 版本
-      placeholder: 例如 0.2.0-rc4
+      placeholder: 例如 0.2.0-rc5
     validations:
       required: true
   - type: input
@@ -46,7 +46,7 @@ body:
       label: 出问题的模块
       options:
         - App 启动 / Gatekeeper
-        - NCM 转换
+        - 格式转换
         - 人声分离
         - 声音克隆
         - 模型下载

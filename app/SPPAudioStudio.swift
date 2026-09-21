@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 
 enum SidebarItem: String, CaseIterable, Identifiable {
     case workbench = "工作台"
-    case convert = "网易云转换"
+    case convert = "格式转换"
     case separate = "人声分离"
     case clone = "声音克隆"
     case environment = "模型与环境"
@@ -88,8 +88,8 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
         Bundle.main.url(forResource: "spp_worker", withExtension: "py", subdirectory: "worker")
     }
 
-    private var bundledNCM: URL? {
-        Bundle.main.url(forResource: "ncm_converter", withExtension: nil, subdirectory: "bin")
+    private var bundledFormatConverter: URL? {
+        Bundle.main.url(forResource: "format_converter", withExtension: nil, subdirectory: "bin")
     }
 
     private var bundledDefaultVoice: URL? {
@@ -99,7 +99,7 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
     private func workerEnvironment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         env.removeValue(forKey: "PYTHONPATH")
-        if let ncm = bundledNCM { env["SPP_NCM_BIN"] = ncm.path }
+        if let converter = bundledFormatConverter { env["SPP_FORMAT_BIN"] = converter.path }
         if let voice = bundledDefaultVoice { env["SPP_DEFAULT_VOICE_DIR"] = voice.path }
         return env
     }
@@ -195,7 +195,7 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
         switch mode {
         case .convert:
             guard url.pathExtension.lowercased() == "ncm" else {
-                throw WorkerError.message("仅转换模式当前用于 .ncm")
+                throw WorkerError.message("仅转换模式当前用于受支持的特殊格式")
             }
             let json = try runWorkerSync(["convert", url.path, "--output-dir", targetDir])
             return json["output"] as? String
@@ -511,7 +511,7 @@ struct RootView: View {
             Group {
                 switch selection ?? .workbench {
                 case .workbench: WorkbenchView()
-                case .convert: FileToolView(mode: .convert, title: "网易云转换", subtitle: "NCM → 原始 MP3 / FLAC")
+                case .convert: FileToolView(mode: .convert, title: "格式转换", subtitle: "特殊格式 → 原始 MP3 / FLAC")
                 case .separate: FileToolView(mode: .separate, title: "人声分离", subtitle: "Mel-Deux · 去人声 / 提取人声 / 双轨输出")
                 case .clone: VoiceCloneView()
                 case .environment: EnvironmentView()
@@ -693,8 +693,8 @@ struct WorkbenchView: View {
             .overlay(
                 VStack(spacing: 9) {
                     Image(systemName: "plus.circle").font(.system(size: 32, weight: .light))
-                    Text("把 NCM / FLAC / MP3 / WAV / M4A 拖到这里").font(.headline)
-                    Text(mode == .convertAndSeparate ? "NCM 会自动先转换，再进入 Mel-Deux；普通音频直接分离。" : "支持批量加入任务队列")
+                    Text("把特殊格式 / FLAC / MP3 / WAV / M4A 拖到这里").font(.headline)
+                    Text(mode == .convertAndSeparate ? "特殊格式会自动先转换，再进入 Mel-Deux；普通音频直接分离。" : "支持批量加入任务队列")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             )
@@ -775,7 +775,7 @@ struct FileToolView: View {
                         Text(files.isEmpty ? "把文件拖到这里" : "已选择 \(files.count) 个文件")
                             .font(.headline)
                         Text(mode == .convert
-                             ? "支持批量 .ncm"
+                             ? "支持批量特殊格式文件"
                              : "支持 MP3 / FLAC / WAV / M4A 等音频")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -1233,7 +1233,7 @@ struct EnvironmentView: View {
     @EnvironmentObject var state: AppState
 
     private let labels: [String: String] = [
-        "ncm_binary": "NCM 原生转换器",
+        "format_converter_binary": "本地格式转换器",
         "separator_binary": "Mel-Deux 分离引擎",
         "mel_model": "Mel-Deux 模型",
         "mel_config": "Mel-Deux 配置",
