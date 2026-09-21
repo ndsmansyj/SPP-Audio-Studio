@@ -29,6 +29,18 @@
 - AI 功能所需的模型与运行环境可在应用的「模型与环境」页面安装，也可链接已有的本地模型。
 - 当前 RC 版本正在跨设备测试。安装包与更新信息见 [Releases](https://github.com/ndsmansyj/SPP-Audio-Studio/releases)；测试反馈可提交 [Issue](https://github.com/ndsmansyj/SPP-Audio-Studio/issues)。
 
+## 下载与首次打开
+
+1. 在 [Releases](https://github.com/ndsmansyj/SPP-Audio-Studio/releases) 下载最新 DMG。
+2. 打开 DMG，把 **SPP Audio Studio** 拖到 **Applications**。
+3. 当前免费测试版没有 Apple Developer ID。如果 macOS 提示“无法验证开发者”，前往 **系统设置 → 隐私与安全性 → 仍要打开**。
+
+RC6 已自带 Python Core，普通用户**不需要安装 Xcode、Command Line Tools、Homebrew 或系统 Python**。
+
+首次使用 AI 功能时，在「模型与环境」页面先安装对应的 **Qwen / Mel Runtime**，再下载对应模型即可。
+
+遇到问题时，打开「模型与环境」→ **复制诊断报告**，直接把文字粘贴到群里或 GitHub Issue；报告默认隐藏用户名、完整文件路径和声音克隆正文。
+
 ## 从源码构建
 
 项目由 SwiftUI 界面和 Python Worker 组成。构建脚本面向 Apple Silicon macOS，并需要本机可用的 Swift 编译环境与 Python 3.11 Core。
@@ -39,4 +51,4 @@
 
 ## 许可证
 
-项目代码采用 [MIT License](LICENSE)。默认演示人声和第三方模型分别遵循独立条款；使用或再分发前请阅读 [人声素材说明](VOICE_ASSET_LICENSE.md) 与 [第三方声明](THIRD_PARTY_NOTICES.md)。Mel-Deux 模型采用 **CC BY-NC 4.0**，不适用于商业用途。
+项目代码采用 [MIT License](LICENSE)。默认演示人声、像素头像/品牌图标和第三方模型分别遵循独立条款；使用或再分发前请阅读 [人声素材说明](VOICE_ASSET_LICENSE.md)、[品牌与肖像素材说明](BRANDING_ASSET_LICENSE.md) 与 [第三方声明](THIRD_PARTY_NOTICES.md)。Mel-Deux 模型采用 **CC BY-NC 4.0**，不适用于商业用途。

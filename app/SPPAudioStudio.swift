@@ -191,6 +191,7 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
     private func workerEnvironment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         env.removeValue(forKey: "PYTHONPATH")
+        env.removeValue(forKey: "PYTHONHOME")
         env["PYTHONNOUSERSITE"] = "1"
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         if let converter = bundledFormatConverter { env["SPP_FORMAT_BIN"] = converter.path }

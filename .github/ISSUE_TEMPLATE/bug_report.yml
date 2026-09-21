@@ -66,6 +66,14 @@ body:
     validations:
       required: true
   - type: textarea
+    id: diagnostic
+    attributes:
+      label: 诊断报告
+      description: 在“模型与环境”里点击“复制诊断报告”，直接粘贴到这里。
+      placeholder: SPP Audio Studio Diagnostic Report...
+    validations:
+      required: false
+  - type: textarea
     id: error
     attributes:
       label: 错误原文 / 截图

@@ -152,10 +152,10 @@ def cmd_doctor(_: argparse.Namespace) -> int:
         "bundled_python_core": PYTHON_CORE.is_file() and os.access(PYTHON_CORE, os.X_OK),
         "format_converter_binary": FORMAT_BIN.is_file() and os.access(FORMAT_BIN, os.X_OK),
         "qwen_runtime": bool(env["qwen_runtime_installed"]),
-        "qwen_model": qwen_model.is_dir(),
+        "qwen_model": _model_files_complete(qwen_model, QWEN_FILES),
         "qwen_bridge": BRIDGE.is_file(),
         "mel_runtime": bool(env["separator_runtime_installed"]),
-        "mel_model": (mel_model_dir / MEL_MODEL).is_file(),
+        "mel_model": _model_files_complete(mel_model_dir, MEL_FILES),
         "mel_config": (mel_model_dir / "config_deux_becruily.yaml").is_file(),
         "mel_ffmpeg": locate_ffmpeg() is not None,
         "asr_optional": asr_python.is_file() and asr_model.exists(),
@@ -444,8 +444,18 @@ def resolve_environment() -> dict:
     }
 
 
+def _model_files_complete(folder: Path, files: dict[str, int]) -> bool:
+    for relpath, expected_size in files.items():
+        target = folder / relpath
+        if not target.is_file() or target.stat().st_size != expected_size:
+            return False
+    return True
+
+
 def cmd_model_status(_: argparse.Namespace) -> int:
     env = resolve_environment()
+    qwen_model_path = Path(env["qwen_model"])
+    mel_model_path = Path(env["mel_model_dir"])
     payload = {
         "ok": True,
         "download_source": env["download_source"],
@@ -458,13 +468,13 @@ def cmd_model_status(_: argparse.Namespace) -> int:
                 "repo": QWEN_REPO,
                 "path": str(env["qwen_model"]),
                 "source": env["qwen_model_source"],
-                "installed": Path(env["qwen_model"]).is_dir(),
+                "installed": _model_files_complete(qwen_model_path, QWEN_FILES),
             },
             "mel_deux": {
                 "repo": MEL_REPO,
                 "path": str(env["mel_model_dir"]),
                 "source": env["mel_model_source"],
-                "installed": (Path(env["mel_model_dir"]) / MEL_MODEL).is_file(),
+                "installed": _model_files_complete(mel_model_path, MEL_FILES),
             },
         },
         "runtime": {

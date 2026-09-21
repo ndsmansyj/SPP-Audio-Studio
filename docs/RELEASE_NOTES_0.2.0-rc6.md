@@ -44,7 +44,9 @@ RC6 主要解决“干净 Mac”安装与排障体验。
 - Mel-Deux 仅伴奏回归：PASS
 - Qwen 声音克隆回归：PASS
 - Qwen Runtime 的预编译依赖解析：PASS
-- Mel Runtime 的 MDXC 预编译依赖解析：PASS
+- 内置 Python + managed PYTHONPATH 方式实际生成 Qwen 克隆语音：PASS
+- Mel Runtime 的预编译依赖解析：PASS
+- 不完整的模型下载不会误显示为“已安装”：PASS
 - 日志文件自动创建：PASS
 - App ad-hoc codesign：PASS
 - DMG checksum：PASS

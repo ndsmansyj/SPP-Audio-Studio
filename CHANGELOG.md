@@ -17,7 +17,8 @@ Clean-Mac runtime release candidate.
 ### Fixed
 - Clean Macs no longer trigger Xcode Command Line Tools just to start the Worker.
 - Runtime installation avoids source compilation on clean Macs.
-- Qwen runtime dependency versions are pinned to the known-good local environment.
+- Qwen and Mel Runtime dependency versions are pinned to tested Apple Silicon combinations.
+- Interrupted/partial model downloads are no longer reported as fully installed.
 
 ### Clean-Mac test focus
 - Apple Silicon + macOS 14+.
