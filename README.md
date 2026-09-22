@@ -29,7 +29,7 @@ SPP Audio Studio 把常用的本地音频处理集中到一个简单的桌面应
 | **Windows** | `SPPAudioStudio-1.0.0-win-x64.zip` | Windows 10 / 11 x64；AI 功能推荐 NVIDIA GPU |
 | **macOS** | `SPP-Audio-Studio-1.0.0.dmg` | Apple Silicon · macOS 14+ |
 
-Release Assets 同时提供 SHA-256 校验文件。
+Release 页面同时列出对应安装包的 SHA-256 校验值。
 
 > 首次使用 AI 功能时，需要在「模型与环境」页面下载对应模型与运行环境。
 
