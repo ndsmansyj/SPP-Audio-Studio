@@ -25,7 +25,7 @@ class WorkerTests(unittest.TestCase):
 
     def call(self, *args):
         proc = subprocess.run([sys.executable, str(WORKER), *args], env=self.env,
-                              capture_output=True, text=True, timeout=20)
+                              capture_output=True, text=True, encoding="utf-8", timeout=20)
         self.assertTrue(proc.stdout.strip(), proc.stderr)
         return proc.returncode, json.loads(proc.stdout.splitlines()[-1])
 
@@ -62,6 +62,31 @@ class WorkerTests(unittest.TestCase):
     def test_download_source_persists(self):
         self.assertEqual(self.call("download-source", "official")[1]["download_source"], "official")
         self.assertEqual(self.call("model-status")[1]["download_source"], "official")
+
+    def test_model_storage_can_switch_between_appdata_and_portable_root(self):
+        portable_root = Path(self.tmp.name) / "portable-app"
+        self.env["SPP_APP_ROOT"] = str(portable_root)
+
+        code, initial = self.call("model-status")
+        self.assertEqual(code, 0)
+        self.assertEqual(initial["model_storage"], "appdata")
+        self.assertTrue(initial["model_root"].endswith(str(Path("SPP Audio Studio") / "Models")))
+
+        code, portable = self.call("model-storage", "portable")
+        self.assertEqual(code, 0)
+        self.assertEqual(portable["model_storage"], "portable")
+        self.assertEqual(Path(portable["model_root"]), portable_root / "Models")
+        self.assertTrue((portable_root / "Models").is_dir())
+
+        code, persisted = self.call("model-status")
+        self.assertEqual(code, 0)
+        self.assertEqual(persisted["model_storage"], "portable")
+        self.assertEqual(Path(persisted["model_root"]), portable_root / "Models")
+
+        code, appdata = self.call("model-storage", "appdata")
+        self.assertEqual(code, 0)
+        self.assertEqual(appdata["model_storage"], "appdata")
+        self.assertEqual(Path(appdata["model_root"]), Path(self.tmp.name) / "SPP Audio Studio" / "Models")
 
     def test_local_api_loopback_auth_and_status(self):
         environment = patch.dict(os.environ, self.env)
@@ -119,13 +144,21 @@ class WorkerTests(unittest.TestCase):
         part = target.with_suffix(".bin.part")
         part.write_bytes(b"12")
         commands = []
-        def fake_run(cmd, **kwargs):
-            commands.append(cmd)
-            if len(commands) == 2:
-                part.write_bytes(b"12345")
-            return subprocess.CompletedProcess(cmd, 22 if len(commands) == 1 else 0)
-        with patch.object(worker.shutil, "which", return_value="C:/tools/curl.exe"), patch.object(worker.subprocess, "run", side_effect=fake_run):
-            worker._download_one("a/b", "main", "model.bin", {"size": 5, "sha256": None}, target, "mirror")
+        class FakeProcess:
+            def __init__(self, cmd):
+                commands.append(cmd)
+                self.returncode = 22 if len(commands) == 1 else 0
+                if len(commands) == 2:
+                    part.write_bytes(b"12345")
+            def poll(self):
+                return self.returncode
+        with patch.object(worker.shutil, "which", return_value="C:/tools/curl.exe"), \
+             patch.object(worker.subprocess, "Popen", side_effect=FakeProcess), \
+             patch.object(worker.time, "sleep", return_value=None):
+            worker._download_one(
+                "a/b", "main", "model.bin", {"size": 5, "sha256": None}, target, "mirror",
+                model="qwen", completed_before=0, model_total=5,
+            )
         self.assertEqual(target.read_bytes(), b"12345")
         self.assertEqual(len(commands), 2)
         self.assertEqual(commands[0][0], "C:/tools/curl.exe")
@@ -141,13 +174,21 @@ class WorkerTests(unittest.TestCase):
         target = Path(self.tmp.name) / "model.bin"
         part = target.with_suffix(".bin.part")
         payload = b"12345"
-        def fake_run(cmd, **kwargs):
-            part.write_bytes(payload)
-            return subprocess.CompletedProcess(cmd, 0)
+        class FakeProcess:
+            def __init__(self, cmd):
+                part.write_bytes(payload)
+                self.returncode = 0
+            def poll(self):
+                return self.returncode
         expected = hashlib.sha256(b"other").hexdigest()
-        with patch.object(worker.shutil, "which", return_value="C:/tools/curl.exe"), patch.object(worker.subprocess, "run", side_effect=fake_run):
+        with patch.object(worker.shutil, "which", return_value="C:/tools/curl.exe"), \
+             patch.object(worker.subprocess, "Popen", side_effect=FakeProcess), \
+             patch.object(worker.time, "sleep", return_value=None):
             with self.assertRaisesRegex(RuntimeError, "SHA-256"):
-                worker._download_one("a/b", "rev", "model.bin", {"size": len(payload), "sha256": expected}, target, "official")
+                worker._download_one(
+                    "a/b", "rev", "model.bin", {"size": len(payload), "sha256": expected}, target, "official",
+                    model="qwen", completed_before=0, model_total=len(payload),
+                )
         self.assertFalse(target.exists())
 
     def test_runtime_detection_uses_qwen_tts_and_faster_whisper(self):
@@ -229,35 +270,36 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("torch==2.11.0+cu126", " ".join(commands[0]))
         self.assertTrue(any("torch.cuda.is_available" in " ".join(c) for c in commands))
 
-    def test_frozen_worker_reexecutes_hidden_commands_instead_of_python_flags(self):
+    def test_frozen_worker_uses_python_core_for_managed_commands(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location("win_worker_frozen_commands", WORKER)
         worker = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(worker)
-        exe = Path("C:/release/SPPWorker.exe")
+        python_core = Path("C:/release/python-core/python.exe")
+        worker_exe = "C:/release/worker/SPPWorker/SPPWorker.exe"
         with patch.object(worker, "IS_FROZEN", True), \
-             patch.object(worker, "PYTHON_CORE", exe):
+             patch.object(worker, "PYTHON_CORE", python_core), \
+             patch.object(worker.sys, "executable", worker_exe):
             self.assertEqual(
                 worker._managed_command("qwen", ["--text", "hello"]),
-                [str(exe), "_qwen-bridge", "--text", "hello"],
+                [str(python_core), str(worker.BRIDGE), "--text", "hello"],
             )
             self.assertEqual(
                 worker._managed_command("mel", ["--output_dir", "out"]),
-                [str(exe), "_mel-bridge", "--output_dir", "out"],
+                [str(python_core), str(worker.MEL_BRIDGE), "--output_dir", "out"],
             )
             self.assertEqual(
                 worker._pip_command(["install", "demo"]),
-                [str(exe), "_pip", "install", "demo"],
+                [str(python_core), "-m", "pip", "install", "demo"],
             )
-            self.assertEqual(
-                worker._verify_command("asr", Path("C:/runtime/asr/site-packages")),
-                [str(exe), "_verify-runtime", "asr", str(Path("C:/runtime/asr/site-packages"))],
-            )
+            verify = worker._verify_command("asr", Path("C:/runtime/asr/site-packages"))
+            self.assertEqual(verify[:2], [str(python_core), "-c"])
+
             self.assertTrue(worker._managed_bridge_available("qwen"))
             self.assertTrue(worker._managed_bridge_available("mel"))
             self.assertEqual(
                 worker._bundled_format_binary(),
-                exe.parent.parent / "bin" / "format_converter.exe",
+                Path("C:/release/worker/bin/format_converter.exe"),
             )
 
     def test_development_worker_keeps_normal_python_execution(self):
@@ -278,39 +320,23 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(verify[:2], [str(python), "-c"])
             self.assertIn("qwen_tts", verify[2])
 
-    def test_frozen_worker_ignores_external_python_core_override(self):
+    def test_frozen_worker_resolves_python_core_and_bridges_from_release_layout(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location("win_worker_frozen_core", WORKER)
         worker = importlib.util.module_from_spec(spec)
+        worker_exe = "C:/release/worker/SPPWorker/SPPWorker.exe"
         with patch.object(sys, "frozen", True, create=True), \
+             patch.object(sys, "executable", worker_exe), \
              patch.dict(os.environ, {"SPP_PYTHON_CORE": "C:/wrong/python.exe"}):
             spec.loader.exec_module(worker)
-        self.assertEqual(worker.PYTHON_CORE, Path(sys.executable))
+        self.assertEqual(worker.PYTHON_CORE, Path("C:/release/python-core/python.exe"))
+        self.assertEqual(worker.BRIDGE, Path("C:/release/worker/qwen_bridge.py"))
+        self.assertEqual(worker.MEL_BRIDGE, Path("C:/release/worker/mel_bridge.py"))
+        self.assertEqual(worker.BUNDLED_FORMAT_BIN, Path("C:/release/worker/bin/format_converter.exe"))
 
-    def test_qwen_bridge_uses_worker_subcommand_for_frozen_asr(self):
+    def test_qwen_bridge_transcribe_uses_python_interpreter(self):
         import importlib.util
-        spec = importlib.util.spec_from_file_location("win_qwen_frozen_asr", ROOT / "worker/qwen_bridge.py")
-        bridge = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(bridge)
-        worker_exe = Path(self.tmp.name) / "SPPWorker.exe"
-        worker_exe.write_bytes(b"exe")
-        model = Path(self.tmp.name) / "asr"
-        model.mkdir()
-        commands = []
-        def fake_run(cmd, **kwargs):
-            commands.append(cmd)
-            return subprocess.CompletedProcess(cmd, 0, "转写结果\n", "")
-        with patch.object(bridge, "ASR_PY", worker_exe), \
-             patch.object(bridge, "ASR_MODEL", model), \
-             patch.object(bridge, "ASR_WORKER_REEXEC", True), \
-             patch.object(bridge.subprocess, "run", side_effect=fake_run):
-            self.assertEqual(bridge.transcribe(Path(self.tmp.name) / "ref.wav"), "转写结果")
-        self.assertEqual(commands[0][:2], [str(worker_exe), "_asr-transcribe"])
-        self.assertNotIn("-c", commands[0])
-
-    def test_qwen_bridge_keeps_linked_asr_python_execution_when_frozen(self):
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("win_qwen_linked_asr", ROOT / "worker/qwen_bridge.py")
+        spec = importlib.util.spec_from_file_location("win_qwen_asr", ROOT / "worker/qwen_bridge.py")
         bridge = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(bridge)
         python = Path(self.tmp.name) / "python.exe"
@@ -323,8 +349,6 @@ class WorkerTests(unittest.TestCase):
             return subprocess.CompletedProcess(cmd, 0, "linked result\n", "")
         with patch.object(bridge, "ASR_PY", python), \
              patch.object(bridge, "ASR_MODEL", model), \
-             patch.object(bridge, "IS_FROZEN", True), \
-             patch.object(bridge, "ASR_WORKER_REEXEC", False), \
              patch.object(bridge.subprocess, "run", side_effect=fake_run):
             self.assertEqual(bridge.transcribe(Path(self.tmp.name) / "ref.wav"), "linked result")
         self.assertEqual(commands[0][:2], [str(python), "-c"])

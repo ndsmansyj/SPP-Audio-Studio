@@ -17,25 +17,27 @@ ASR_PY = Path(os.environ.get("SPP_ASR_PY", "")).expanduser()
 ASR_MODEL = Path(os.environ.get("SPP_ASR_MODEL", "")).expanduser()
 ASR_SITE = os.environ.get("SPP_ASR_SITE", "")
 IS_FROZEN = bool(getattr(sys, "frozen", False))
-ASR_WORKER_REEXEC = IS_FROZEN and os.environ.get("SPP_ASR_WORKER_REEXEC") == "1"
 
 
 def add_managed_dll_directories() -> None:
-    """Make DLLs from the external managed runtime visible to frozen workers."""
+    """Expose only the native library directory that PyTorch owns.
+
+    Scanning every DLL directory below site-packages pollutes Windows' loader
+    search order and can make unrelated native extensions resolve the wrong
+    dependency. PyTorch already keeps its CUDA/runtime DLLs under torch/lib.
+    """
     if not IS_FROZEN or not os.environ.get("PYTHONPATH"):
         return
     site = Path(os.environ["PYTHONPATH"])
-    if not site.is_dir() or not hasattr(os, "add_dll_directory"):
+    torch_lib = site / "torch" / "lib"
+    if not torch_lib.is_dir() or not hasattr(os, "add_dll_directory"):
         return
-    directories = {p.parent for p in site.rglob("*.dll")}
+
     global _DLL_HANDLES
-    _DLL_HANDLES = []
-    os.environ["PATH"] = os.pathsep.join([str(p) for p in sorted(directories)] + [os.environ.get("PATH", "")])
-    for directory in sorted(directories):
-        try:
-            _DLL_HANDLES.append(os.add_dll_directory(str(directory)))
-        except OSError:
-            pass
+    try:
+        _DLL_HANDLES = [os.add_dll_directory(str(torch_lib))]
+    except OSError:
+        _DLL_HANDLES = []
 
 
 _DLL_HANDLES: list[object] = []
@@ -77,9 +79,7 @@ def transcribe(wav_path: Path) -> str:
     env.pop("PYTHONPATH", None)
     if ASR_SITE:
         env["PYTHONPATH"] = ASR_SITE
-    command = ([str(ASR_PY), "_asr-transcribe", str(wav_path), str(ASR_MODEL), ASR_SITE]
-               if ASR_WORKER_REEXEC else
-               [str(ASR_PY), "-c", script, str(wav_path), str(ASR_MODEL)])
+    command = [str(ASR_PY), "-c", script, str(wav_path), str(ASR_MODEL)]
     proc = subprocess.run(
         command,
         capture_output=True, text=True, env=env, timeout=300

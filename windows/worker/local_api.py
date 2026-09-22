@@ -14,7 +14,10 @@ PYTHON = Path(os.environ.get("SPP_PYTHON_CORE", sys.executable))
 
 
 def run_worker(args):
-    proc = subprocess.run([str(PYTHON), str(WORKER), *args], capture_output=True, text=True, timeout=3600)
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    proc = subprocess.run([str(PYTHON), str(WORKER), *args], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", env=env, timeout=3600)
     lines = proc.stdout.strip().splitlines()
     try:
         result = json.loads(lines[-1]) if lines else {}

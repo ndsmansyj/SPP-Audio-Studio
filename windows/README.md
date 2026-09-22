@@ -19,11 +19,11 @@ dotnet build windows/src/SPPAudioStudio.Windows/SPPAudioStudio.Windows.csproj -c
 python -m unittest discover -s windows/tests -v
 ```
 
-应用最小窗口为 1040×720，固定深色主题。未成功连接 Worker 或模型未通过健康检查时，界面必须如实显示未就绪，不使用样例状态冒充真实运行状态。
+应用默认窗口为 1180×960，最小窗口为 1040×840，固定深色主题。未成功连接 Worker 或模型未通过健康检查时，界面必须如实显示未就绪，不使用样例状态冒充真实运行状态。
 
 ## Windows Worker
 
-NCM 转换器命令行：`windows/artifacts/publish/win-x64/app/bin/format_converter.exe input.ncm --out output-dir`。它读取 NCM 的 AES/RC4 加密段，保留原始 MP3/FLAC 编码，不改写源文件，并在输出已存在时跳过。
+NCM 转换器命令行：`SPP Audio Studio/worker/bin/format_converter.exe input.ncm --out output-dir`。它读取 NCM 的 AES/RC4 加密段，保留原始 MP3/FLAC 编码，不改写源文件，并在输出已存在时跳过。
 
 要求 Windows 11 x64、Python 3.11/3.12、`curl.exe` 与 FFmpeg。可通过 `SPP_PYTHON_CORE` 指定 App 自带 Python，通过 `SPP_FORMAT_BIN` 指定转换器。状态保存在 `%LOCALAPPDATA%\SPP Audio Studio\` 下，包括 `Models`、`Voices`、`Runtime`、`Cache`、设置及历史记录。
 
@@ -57,7 +57,7 @@ This directory owns the Windows implementation layout and its build tooling. The
 - `windows/worker/`: Python worker with `main.py`, `spp_worker.py`, `local_api.py`, or `__main__.py` (or pass `-WorkerEntryPoint`).
 - `windows/worker/requirements.lock`: preferred pinned worker dependencies. `requirements.txt` is accepted with a reproducibility warning.
 
-Generated files stay below `windows/artifacts/` and `windows/.venv/`.
+Intermediate build files stay below `windows/artifacts/` and `windows/.venv/`; the visible portable release is generated in the repository-root `SPP Audio Studio/` directory.
 
 ## Prerequisites and bootstrap
 
@@ -114,9 +114,9 @@ The release strategy is **unpackaged, self-contained, portable**:
 
 - WinUI app: .NET self-contained publish plus Windows App SDK self-contained files.
 - Python worker: PyInstaller `--onedir`; no system Python is required on the target machine.
-- Output tree: `windows/artifacts/publish/win-x64/`.
-- Archive: `windows/artifacts/packages/SPPAudioStudio-<version>-win-x64.zip`.
-- Integrity: `release-manifest.json`, `SHA256SUMS`, and an archive `.sha256` file.
+- Output tree: `SPP Audio Studio\` at the repository root, with `SPPAudioStudio.Windows.exe` directly in that folder and the frozen Worker under `worker\`.
+- Archive: `windows/artifacts/packages/SPPAudioStudio-<version>-win-x64.zip`; extracting it preserves the top-level `SPP Audio Studio/` folder.
+- Integrity: `SPP Audio Studio/release-manifest.json`, `SPP Audio Studio/SHA256SUMS`, and an archive `.sha256` file.
 
 This is intentionally not MSIX: portable builds avoid certificate/install requirements and are suitable for CI artifacts and developer previews. Add an MSIX signing pipeline separately when an installer identity and signing certificate are available.
 

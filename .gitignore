@@ -6,6 +6,7 @@
 build/
 dist/
 release/
+/SPP Audio Studio/
 *.app/
 *.dmg
 *.zip

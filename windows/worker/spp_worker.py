@@ -15,6 +15,12 @@ import time
 from pathlib import Path
 from urllib.parse import quote
 
+# The WinUI host reads Worker stdout/stderr as UTF-8. Force the frozen
+# interpreter to use the same encoding instead of the active Windows code page.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 APP_NAME = "SPP Audio Studio"
 LOCAL_APP_DATA = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
 DATA_DIR = LOCAL_APP_DATA / APP_NAME
@@ -29,22 +35,78 @@ SETTINGS_FILE = DATA_DIR / "settings.json"
 IS_FROZEN = bool(getattr(sys, "frozen", False))
 
 
+def _app_root() -> Path:
+    if IS_FROZEN:
+        # published: <root>/worker/SPPWorker/SPPWorker.exe
+        return Path(sys.executable).resolve().parent.parent.parent
+    return Path(os.environ.get("SPP_APP_ROOT", str(DATA_DIR))).expanduser()
+
+
+APP_ROOT = _app_root()
+
+
+def _configured_model_dir() -> Path:
+    try:
+        if SETTINGS_FILE.is_file():
+            settings = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            if settings.get("model_storage") == "portable":
+                return APP_ROOT / "Models"
+    except Exception:
+        pass
+    return DATA_DIR / "Models"
+
+
+MODEL_DIR = _configured_model_dir()
+OUTPUT_ROOT = APP_ROOT / "out"
+CLONE_OUTPUT_DIR = OUTPUT_ROOT / "Clone"
+SEPARATION_OUTPUT_DIR = OUTPUT_ROOT / "Music Separation"
+
+
 def _bundled_format_binary() -> Path:
-    # publish.ps1 places converter at worker/bin and the onedir EXE at
-    # worker/SPPWorker/SPPWorker.exe, matching WorkerLocator's release layout.
-    root = PYTHON_CORE.parent.parent if IS_FROZEN else Path(__file__).resolve().parent.parent
-    return root / "bin" / "format_converter.exe"
+    # Published layout:
+    #   worker/SPPWorker/SPPWorker.exe
+    #   worker/bin/format_converter.exe
+    if IS_FROZEN:
+        worker_root = Path(sys.executable).resolve().parent.parent
+        return worker_root / "bin" / "format_converter.exe"
+    return Path(__file__).resolve().parent.parent / "bin" / "format_converter.exe"
 
 
-PYTHON_CORE = Path(sys.executable if IS_FROZEN else os.environ.get("SPP_PYTHON_CORE", sys.executable)).expanduser()
+def _bundled_python_core() -> Path:
+    if not IS_FROZEN:
+        return Path(os.environ.get("SPP_PYTHON_CORE", sys.executable)).expanduser()
+    # Published layout: worker/SPPWorker/SPPWorker.exe and sibling python-core/python.exe.
+    return Path(sys.executable).resolve().parent.parent.parent / "python-core" / "python.exe"
+
+
+PYTHON_CORE = _bundled_python_core()
 BUNDLED_FORMAT_BIN = _bundled_format_binary()
 FORMAT_BIN = Path(os.environ.get("SPP_FORMAT_BIN", str(BUNDLED_FORMAT_BIN))).expanduser()
 MEL_MODEL = os.environ.get("SPP_MEL_MODEL", "becruily_deux.ckpt")
 MEL_REGISTRY_NAME = "Roformer Model: Mel-Band RoFormer Deux by becruily"
 MEL_CONFIG = "config_deux_becruily.yaml"
-BRIDGE = Path(__file__).with_name("qwen_bridge.py")
-MEL_BRIDGE = Path(__file__).with_name("mel_bridge.py")
-DEFAULT_VOICE_DIR = Path(os.environ.get("SPP_DEFAULT_VOICE_DIR", "")).expanduser()
+
+
+def _bundled_worker_file(name: str) -> Path:
+    if IS_FROZEN:
+        return Path(sys.executable).resolve().parent.parent / name
+    return Path(__file__).with_name(name)
+
+
+BRIDGE = _bundled_worker_file("qwen_bridge.py")
+MEL_BRIDGE = _bundled_worker_file("mel_bridge.py")
+
+
+def _default_voice_dir() -> Path:
+    override = os.environ.get("SPP_DEFAULT_VOICE_DIR")
+    if override:
+        return Path(override).expanduser()
+    if IS_FROZEN:
+        return Path(sys.executable).resolve().parent.parent / "default_voice"
+    return Path(__file__).resolve().parents[2] / "assets" / "default_voice"
+
+
+DEFAULT_VOICE_DIR = _default_voice_dir()
 QWEN_RUNTIME_DIR = RUNTIME_DIR / "qwen"
 QWEN_SITE = QWEN_RUNTIME_DIR / "site-packages"
 MEL_RUNTIME_DIR = RUNTIME_DIR / "mel"
@@ -107,7 +169,7 @@ WHISPER_FILES = {
 
 
 def ensure_dirs() -> None:
-    for p in (DATA_DIR, CACHE_DIR, VOICE_DIR, MODEL_DIR, RUNTIME_DIR):
+    for p in (DATA_DIR, CACHE_DIR, VOICE_DIR, MODEL_DIR, RUNTIME_DIR, CLONE_OUTPUT_DIR, SEPARATION_OUTPUT_DIR):
         p.mkdir(parents=True, exist_ok=True)
 
 
@@ -140,28 +202,23 @@ def append_history(kind: str, source: str, output: str, status: str = "done") ->
 def run_capture(cmd: list[str], env: dict | None = None) -> subprocess.CompletedProcess:
     merged = os.environ.copy()
     merged.pop("PYTHONPATH", None)
+    merged["PYTHONIOENCODING"] = "utf-8"
     if env:
         merged.update(env)
-    return subprocess.run(cmd, capture_output=True, text=True, errors="replace", env=merged)
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", env=merged)
 
 
 def _managed_command(kind: str, args: list[str]) -> list[str]:
-    """Run managed AI code in a fresh interpreter, including when frozen."""
-    if IS_FROZEN:
-        return [str(PYTHON_CORE), f"_{kind}-bridge", *args]
+    """Run managed AI code in a real CPython interpreter."""
     script = {"qwen": BRIDGE, "mel": MEL_BRIDGE}[kind]
     return [str(PYTHON_CORE), str(script), *args]
 
 
 def _managed_bridge_available(kind: str) -> bool:
-    if IS_FROZEN:
-        return True
     return {"qwen": BRIDGE, "mel": MEL_BRIDGE}[kind].is_file()
 
 
 def _pip_command(args: list[str]) -> list[str]:
-    if IS_FROZEN:
-        return [str(PYTHON_CORE), "_pip", *args]
     return [str(PYTHON_CORE), "-m", "pip", *args]
 
 
@@ -175,8 +232,6 @@ def _verification_script(kind: str) -> str:
 
 
 def _verify_command(kind: str, site: Path) -> list[str]:
-    if IS_FROZEN:
-        return [str(PYTHON_CORE), "_verify-runtime", kind, str(site)]
     return [str(PYTHON_CORE), "-c", _verification_script(kind)]
 
 
@@ -280,7 +335,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
     if not FORMAT_BIN.is_file():
         return emit({"ok": False, "error": f"格式转换器不存在：{FORMAT_BIN}"}, 3)
 
-    out_root = Path(args.output_dir).expanduser() if args.output_dir else src.parent / "SPP Audio"
+    out_root = Path(args.output_dir).expanduser() if args.output_dir else SEPARATION_OUTPUT_DIR
     out_root.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix="ncm-", dir=CACHE_DIR))
     try:
@@ -307,7 +362,7 @@ def cmd_separate(args: argparse.Namespace) -> int:
     if env["separator_source"] == "linked":
         return emit({"ok": False, "error": "外部 Separator 无法验证 CUDA-only；请安装托管 Mel CUDA Runtime。"}, 3)
 
-    out_dir = Path(args.output_dir).expanduser() if args.output_dir else src.parent / "SPP Audio" / src.stem
+    out_dir = Path(args.output_dir).expanduser() if args.output_dir else SEPARATION_OUTPUT_DIR / src.stem
     out_dir.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix="mel-", dir=CACHE_DIR))
     fmt = args.format.upper()
@@ -380,13 +435,7 @@ def bridge_clone(ref_audio: Path, text: str, ref_text: str, output_dir: Path,
         bridge_args += ["--ref-text", ref_text]
 
     if env_cfg["qwen_python_source"] == "managed":
-        if IS_FROZEN:
-            host_python = shutil.which("python.exe") or shutil.which("python")
-            host_bridge = PYTHON_CORE.parent.parent / "qwen_bridge.py"
-            cmd = ([host_python, str(host_bridge if host_bridge.is_file() else BRIDGE), *bridge_args]
-                   if host_python else _managed_command("qwen", bridge_args))
-        else:
-            cmd = _managed_command("qwen", bridge_args)
+        cmd = _managed_command("qwen", bridge_args)
     else:
         cmd = [str(qwen_python), str(BRIDGE), *bridge_args]
 
@@ -395,7 +444,6 @@ def bridge_clone(ref_audio: Path, text: str, ref_text: str, output_dir: Path,
         "SPP_ASR_PY": str(env_cfg["asr_python"]),
         "SPP_ASR_MODEL": str(env_cfg["asr_model"]),
         "SPP_ASR_SITE": str(env_cfg["asr_site"] if env_cfg["asr_python_source"] == "managed" else ""),
-        "SPP_ASR_WORKER_REEXEC": "1" if IS_FROZEN and env_cfg["asr_python_source"] == "managed" else "0",
         "PYTHONNOUSERSITE": "1",
     }
     if env_cfg["qwen_python_source"] == "managed":
@@ -421,7 +469,7 @@ def cmd_clone(args: argparse.Namespace) -> int:
     ref = Path(args.ref_audio).expanduser().resolve()
     if not ref.is_file():
         return emit({"ok": False, "error": f"参考音频不存在：{ref}"}, 2)
-    out_dir = Path(args.output_dir).expanduser() if args.output_dir else DATA_DIR / "Outputs" / "Voice"
+    out_dir = Path(args.output_dir).expanduser() if args.output_dir else CLONE_OUTPUT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     try:
         result = bridge_clone(
@@ -583,6 +631,8 @@ def cmd_model_status(_: argparse.Namespace) -> int:
     payload = {
         "ok": True,
         "download_source": env["download_source"],
+        "model_storage": load_settings().get("model_storage", "appdata"),
+        "model_root": str(MODEL_DIR),
         "python_core": {
             "path": str(PYTHON_CORE),
             "installed": PYTHON_CORE.is_file() and os.access(PYTHON_CORE, os.X_OK),
@@ -663,6 +713,19 @@ def cmd_download_source(args: argparse.Namespace) -> int:
         "mirror": HF_MIRROR,
     })
 
+
+def cmd_model_storage(args: argparse.Namespace) -> int:
+    global MODEL_DIR
+    settings = load_settings()
+    settings["model_storage"] = args.storage
+    save_settings(settings)
+    MODEL_DIR = APP_ROOT / "Models" if args.storage == "portable" else DATA_DIR / "Models"
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    return emit({
+        "ok": True,
+        "model_storage": args.storage,
+        "model_root": str(MODEL_DIR),
+    })
 
 
 def _pypi_endpoint_order(source: str) -> list[str]:
@@ -850,46 +913,85 @@ def _endpoint_order(source: str) -> list[str]:
     return [HF_MIRROR, HF_OFFICIAL]
 
 
-def _download_one(repo: str, revision: str, relpath: str, metadata: dict, target: Path, source: str) -> None:
+def _download_one(
+    repo: str,
+    revision: str,
+    relpath: str,
+    metadata: dict,
+    target: Path,
+    source: str,
+    *,
+    model: str,
+    completed_before: int,
+    model_total: int,
+) -> int:
     curl = shutil.which("curl")
     if not curl:
         raise RuntimeError("未找到 curl.exe；请安装 curl 并加入 PATH")
     target.parent.mkdir(parents=True, exist_ok=True)
     expected_size = metadata["size"]
     expected_sha256 = metadata["sha256"]
+
+    def emit_progress(current_file_bytes: int, endpoint: str | None = None) -> None:
+        completed = min(model_total, completed_before + current_file_bytes)
+        percent = round((completed / model_total) * 100, 1) if model_total else 100.0
+        print(json.dumps({
+            "event": "download_progress",
+            "model": model,
+            "file": relpath,
+            "file_bytes": current_file_bytes,
+            "file_total_bytes": expected_size,
+            "completed_bytes": completed,
+            "total_bytes": model_total,
+            "percent": percent,
+            "endpoint": endpoint,
+        }, ensure_ascii=False), flush=True)
+
     if (target.is_file() and target.stat().st_size == expected_size
             and (expected_sha256 is None or _file_sha256(target) == expected_sha256)):
         print(json.dumps({
-            "event": "skip", "file": relpath, "bytes": expected_size
+            "event": "skip", "model": model, "file": relpath, "bytes": expected_size
         }, ensure_ascii=False), flush=True)
-        return
+        emit_progress(expected_size)
+        return expected_size
 
     part = target.with_suffix(target.suffix + ".part")
     errors = []
     for endpoint in _endpoint_order(source):
         url = f"{endpoint}/{repo}/resolve/{revision}/{quote(relpath, safe='/')}"
         print(json.dumps({
-            "event": "download_start", "file": relpath,
-            "endpoint": endpoint, "expected_bytes": expected_size
+            "event": "download_start", "model": model, "file": relpath,
+            "endpoint": endpoint, "expected_bytes": expected_size,
+            "total_bytes": model_total,
         }, ensure_ascii=False), flush=True)
         cmd = [
             curl, "-L", "--fail", "--silent", "--show-error", "--retry", "3",
             "--retry-delay", "2", "--connect-timeout", "15",
             "-C", "-", "-o", str(part), url,
         ]
-        proc = subprocess.run(cmd)
-        if proc.returncode == 0 and part.is_file() and part.stat().st_size == expected_size:
+        proc = subprocess.Popen(cmd)
+        last_size = -1
+        while proc.poll() is None:
+            current_size = part.stat().st_size if part.exists() else 0
+            if current_size != last_size:
+                emit_progress(current_size, endpoint)
+                last_size = current_size
+            time.sleep(0.25)
+        current_size = part.stat().st_size if part.exists() else 0
+        emit_progress(current_size, endpoint)
+        if proc.returncode == 0 and part.is_file() and current_size == expected_size:
             if expected_sha256 and _file_sha256(part) != expected_sha256:
                 errors.append(f"{endpoint}: SHA-256 校验失败")
                 part.unlink(missing_ok=True)
                 continue
             part.replace(target)
             print(json.dumps({
-                "event": "download_done", "file": relpath,
+                "event": "download_done", "model": model, "file": relpath,
                 "bytes": expected_size, "endpoint": endpoint
             }, ensure_ascii=False), flush=True)
-            return
-        errors.append(f"{endpoint}: curl={proc.returncode}, size={part.stat().st_size if part.exists() else 0}")
+            emit_progress(expected_size, endpoint)
+            return expected_size
+        errors.append(f"{endpoint}: curl={proc.returncode}, size={current_size}")
     raise RuntimeError(f"下载失败 {relpath}: " + " | ".join(errors))
 
 
@@ -913,11 +1015,23 @@ def cmd_model_download(args: argparse.Namespace) -> int:
             "event": "model_begin", "model": args.model,
             "repo": repo, "total_bytes": total, "source": source
         }, ensure_ascii=False), flush=True)
+        completed = 0
         for relpath, metadata in files.items():
-            _download_one(repo, revision, relpath, metadata, target_dir / relpath, source)
+            completed += _download_one(
+                repo,
+                revision,
+                relpath,
+                metadata,
+                target_dir / relpath,
+                source,
+                model=args.model,
+                completed_before=completed,
+                model_total=total,
+            )
         print(json.dumps({
             "event": "model_done", "model": args.model,
-            "path": str(target_dir), "total_bytes": total
+            "path": str(target_dir), "total_bytes": total,
+            "percent": 100.0
         }, ensure_ascii=False), flush=True)
         return emit({"ok": True, "model": args.model, "path": str(target_dir), "bytes": total})
     except Exception as e:
@@ -1121,6 +1235,10 @@ def build_parser() -> argparse.ArgumentParser:
     ds.add_argument("source", choices=["auto", "mirror", "official"])
     ds.set_defaults(func=cmd_download_source)
 
+    storage = sub.add_parser("model-storage")
+    storage.add_argument("storage", choices=["appdata", "portable"])
+    storage.set_defaults(func=cmd_model_storage)
+
     md = sub.add_parser("model-download")
     md.add_argument("model", choices=["qwen", "mel", "whisper"])
     md.add_argument("--source", choices=["auto", "mirror", "official"])
@@ -1135,51 +1253,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     ensure_dirs()
-    if len(sys.argv) > 1 and sys.argv[1].startswith("_"):
-        return _run_hidden_command(sys.argv[1], sys.argv[2:])
     parser = build_parser()
     args = parser.parse_args()
     return int(args.func(args))
-
-
-def _prepend_site(site: str | Path) -> None:
-    value = str(site)
-    if value and value not in sys.path:
-        sys.path.insert(0, value)
-
-
-def _run_hidden_command(command: str, args: list[str]) -> int:
-    """Entrypoints used when SPPWorker.exe must act as its Python runtime."""
-    if command == "_pip":
-        from pip._internal.cli.main import main as pip_main
-        return int(pip_main(args))
-    if command == "_verify-runtime":
-        if len(args) != 2 or args[0] not in {"qwen", "mel", "asr"}:
-            raise SystemExit("usage: _verify-runtime qwen|mel|asr SITE_PACKAGES")
-        _prepend_site(args[1])
-        exec(_verification_script(args[0]), {"__name__": "__main__"})
-        return 0
-    if command == "_asr-transcribe":
-        if len(args) != 3:
-            raise SystemExit("usage: _asr-transcribe AUDIO MODEL SITE_PACKAGES")
-        wav_path, model_path, site = args
-        _prepend_site(site)
-        from faster_whisper import WhisperModel
-        model = WhisperModel(model_path, device="cuda", device_index=0, compute_type="float16")
-        segments, _ = model.transcribe(wav_path, language="zh")
-        print("".join(segment.text for segment in segments).strip())
-        return 0
-    if command == "_qwen-bridge":
-        _prepend_site(QWEN_SITE)
-        import qwen_bridge
-        sys.argv = ["qwen_bridge.py", *args]
-        return int(qwen_bridge.main())
-    if command == "_mel-bridge":
-        _prepend_site(MEL_SITE)
-        import mel_bridge
-        sys.argv = ["mel_bridge.py", *args]
-        return int(mel_bridge.main())
-    raise SystemExit(f"unknown internal command: {command}")
 
 
 if __name__ == "__main__":

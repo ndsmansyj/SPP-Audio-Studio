@@ -10,8 +10,16 @@ function Get-ToolchainManifest {
 }
 
 function Get-VsWherePath {
-    $candidate = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-    if (Test-Path $candidate -PathType Leaf) { return $candidate }
+    $roots = @()
+    if (${env:ProgramFiles(x86)}) { $roots += ${env:ProgramFiles(x86)} }
+    $specialFolder = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)
+    if ($specialFolder) { $roots += $specialFolder }
+    if ($env:SystemDrive) { $roots += (Join-Path $env:SystemDrive 'Program Files (x86)') }
+
+    foreach ($root in @($roots | Select-Object -Unique)) {
+        $candidate = Join-Path $root 'Microsoft Visual Studio\Installer\vswhere.exe'
+        if (Test-Path $candidate -PathType Leaf) { return $candidate }
+    }
     return $null
 }
 

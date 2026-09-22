@@ -24,7 +24,7 @@ try {
         "/p:Configuration=$Configuration",
         "/p:Platform=$Platform",
         "/p:RuntimeIdentifier=$runtime",
-        "/p:OutputPath=$output\"
+        "/p:OutputPath=$output"
     )
     if (-not $NoRestore) { $buildArguments += '/restore' }
     Invoke-Native $msbuild @buildArguments
