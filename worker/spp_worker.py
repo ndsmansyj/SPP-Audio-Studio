@@ -923,6 +923,35 @@ def cmd_voice_default(args: argparse.Namespace) -> int:
     return emit({"ok": True, "default_voice": args.id})
 
 
+def cmd_voice_delete(args: argparse.Namespace) -> int:
+    ensure_dirs()
+    root = VOICE_DIR.resolve()
+    folder = (VOICE_DIR / args.id).resolve()
+    if folder.parent != root:
+        return emit({"ok": False, "error": "无效的人声模板 ID"}, 2)
+    cfg_path = folder / "config.json"
+    if not cfg_path.is_file():
+        return emit({"ok": False, "error": f"人声模板不存在：{args.id}"}, 2)
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except Exception:
+        return emit({"ok": False, "error": "人声模板配置损坏，无法安全删除"}, 2)
+    if cfg.get("bundled"):
+        return emit({"ok": False, "error": "内置人声模板不能删除"}, 2)
+
+    settings = load_settings()
+    was_default = settings.get("default_voice") == args.id
+    shutil.rmtree(folder)
+    if was_default:
+        remaining = read_templates()
+        if remaining:
+            settings["default_voice"] = remaining[0]["id"]
+        else:
+            settings.pop("default_voice", None)
+        save_settings(settings)
+    return emit({"ok": True, "deleted": args.id})
+
+
 def cmd_voice_clone(args: argparse.Namespace) -> int:
     folder = VOICE_DIR / args.id
     cfg_path = folder / "config.json"
@@ -992,6 +1021,10 @@ def build_parser() -> argparse.ArgumentParser:
     vd = sub.add_parser("voice-default")
     vd.add_argument("id")
     vd.set_defaults(func=cmd_voice_default)
+
+    vdel = sub.add_parser("voice-delete")
+    vdel.add_argument("id")
+    vdel.set_defaults(func=cmd_voice_delete)
 
     vc = sub.add_parser("voice-clone")
     vc.add_argument("id")

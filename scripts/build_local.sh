@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${VERSION:-0.2.0-rc6}"
-BUILD_NUMBER="${BUILD_NUMBER:-26}"
+VERSION="${VERSION:-1.0.0}"
+BUILD_NUMBER="${BUILD_NUMBER:-100}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BUILD="$ROOT/build/$STAMP"
 APP="$BUILD/SPP Audio Studio.app"

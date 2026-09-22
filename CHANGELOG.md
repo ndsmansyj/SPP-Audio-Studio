@@ -2,7 +2,7 @@
 
 This file tracks public, user-facing changes. Internal RC test notes and handoff documents are intentionally kept out of the public project tree.
 
-## Unreleased
+## 1.0.0 — 2026-09-22
 
 ### Project
 - Unified the public repository around both **Windows** and **macOS**.
@@ -18,9 +18,11 @@ This file tracks public, user-facing changes. Internal RC test notes and handoff
 - Added release manifest and SHA-256 integrity files for portable builds.
 
 ### macOS
-- Apple Silicon desktop application remains available for macOS 14+.
-- Includes local format conversion, Mel-Deux separation, Qwen3-TTS voice cloning, local playback, model/runtime management, and diagnostic reporting.
-- Bundles its own Python Core so normal users do not need Xcode, Homebrew, or a system Python installation.
+- Promoted the Apple Silicon build to **1.0.0** for macOS 14+.
+- Aligned format conversion, Mel-Deux separation, and Qwen3-TTS voice cloning around one serial task queue with a consistent right-side task/history panel.
+- Added queued voice-clone jobs, safe deletion for user-created voice templates, protected bundled templates, and simplified clone output filenames.
+- Switched the desktop UI to a native light appearance with semantic macOS card and separator colors.
+- Retains local playback, model/runtime management, diagnostic reporting, and bundled Python Core so normal users do not need Xcode, Homebrew, or a system Python installation.
 
 ### Distribution notes
 - Windows and macOS binaries are published through GitHub Releases rather than GitHub Packages.

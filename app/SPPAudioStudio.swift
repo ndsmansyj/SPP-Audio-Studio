@@ -44,6 +44,7 @@ struct VoiceTemplate: Identifiable, Hashable {
     let referenceText: String
     let note: String
     let isDefault: Bool
+    let isBundled: Bool
 }
 
 enum WorkerError: LocalizedError {
@@ -169,6 +170,7 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
 
     private var previewPlayer: AVAudioPlayer?
     private let logger = DiagnosticLogger.shared
+    private let taskExecutionQueue = DispatchQueue(label: "com.spp.audio-studio.task-execution", qos: .userInitiated)
 
     override init() {
         super.init()
@@ -303,7 +305,7 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
             tasks.insert(item, at: 0)
             return (url, item.id)
         }
-        DispatchQueue.global(qos: .userInitiated).async {
+        taskExecutionQueue.async {
             for (url, id) in items {
                 let summary = "\(mode.rawValue) · .\(url.pathExtension.lowercased())"
                 DispatchQueue.main.async { self.lastTaskSummary = summary + " · 处理中" }
@@ -594,7 +596,8 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
                         name: $0["name"] as? String ?? "未命名",
                         referenceText: $0["reference_text"] as? String ?? "",
                         note: $0["note"] as? String ?? "",
-                        isDefault: $0["default"] as? Bool ?? false
+                        isDefault: $0["default"] as? Bool ?? false,
+                        isBundled: $0["bundled"] as? Bool ?? false
                     )
                 }
                 DispatchQueue.main.async { self.voices = values }
@@ -630,44 +633,78 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
         }
     }
 
+    func deleteVoice(_ id: String) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                _ = try self.runWorkerSync(["voice-delete", id])
+                DispatchQueue.main.async { self.voiceStatus = "人声模板已删除" }
+                self.refreshVoices()
+            } catch {
+                DispatchQueue.main.async { self.voiceStatus = error.localizedDescription }
+            }
+        }
+    }
+
     func clone(templateID: String?, temporaryRef: URL?, temporaryRefText: String = "", text: String, outputDir: String = "") {
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        let script = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !script.isEmpty else {
             voiceStatus = "先输入需要生成的文案"
             return
         }
-        voiceBusy = true
-        voiceStatus = "正在生成…"
-        lastVoiceOutput = nil
+
+        let title = String(script.prefix(18))
+        let item = TaskItem(
+            title: title.isEmpty ? "声音克隆" : title,
+            mode: "声音克隆",
+            status: "等待中",
+            detail: "已加入生成队列",
+            outputPath: nil
+        )
+        tasks.insert(item, at: 0)
+        voiceStatus = "已加入生成队列"
+        let taskID = item.id
         let expandedOutput = NSString(string: outputDir).expandingTildeInPath
-        DispatchQueue.global(qos: .userInitiated).async {
+
+        taskExecutionQueue.async {
+            self.mutateTask(taskID, status: "处理中", detail: "正在生成…")
+            DispatchQueue.main.async {
+                self.voiceBusy = true
+                self.voiceStatus = "正在生成…"
+            }
             do {
                 let json: [String: Any]
                 if let ref = temporaryRef {
-                    var args = ["clone", "--ref-audio", ref.path, "--text", text]
+                    var args = ["clone", "--ref-audio", ref.path, "--text", script]
                     let referenceText = temporaryRefText.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !referenceText.isEmpty { args += ["--ref-text", referenceText] }
                     if !expandedOutput.isEmpty { args += ["--output-dir", expandedOutput] }
                     json = try self.runWorkerSync(args)
                 } else if let id = templateID {
-                    var args = ["voice-clone", id, "--text", text]
+                    var args = ["voice-clone", id, "--text", script]
                     if !expandedOutput.isEmpty { args += ["--output-dir", expandedOutput] }
                     json = try self.runWorkerSync(args)
                 } else if let first = self.voices.first(where: { $0.isDefault }) ?? self.voices.first {
-                    var args = ["voice-clone", first.id, "--text", text]
+                    var args = ["voice-clone", first.id, "--text", script]
                     if !expandedOutput.isEmpty { args += ["--output-dir", expandedOutput] }
                     json = try self.runWorkerSync(args)
                 } else {
                     throw WorkerError.message("先建立一个人声模板，或选择临时参考音")
                 }
+
+                let output = json["path"] as? String
+                self.mutateTask(taskID, status: "完成", detail: "生成完成", output: output)
                 DispatchQueue.main.async {
                     self.voiceBusy = false
                     self.voiceStatus = "生成完成"
-                    self.lastVoiceOutput = json["path"] as? String
+                    self.lastVoiceOutput = output
                 }
             } catch {
+                let message = self.logger.sanitize(error.localizedDescription)
+                self.recordError(message, context: "task 声音克隆")
+                self.mutateTask(taskID, status: "失败", detail: message)
                 DispatchQueue.main.async {
                     self.voiceBusy = false
-                    self.voiceStatus = error.localizedDescription
+                    self.voiceStatus = message
                 }
             }
         }
@@ -811,8 +848,8 @@ struct SPPAudioStudioApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(state)
-                .frame(minWidth: 1040, minHeight: 720)
-                .preferredColorScheme(.dark)
+                .frame(minWidth: 1280, minHeight: 760)
+                .preferredColorScheme(.light)
                 .onAppear {
                     state.refreshDoctor()
                     state.refreshModels()
@@ -935,8 +972,9 @@ struct WorkbenchView: View {
     @AppStorage("workbench.keep") private var keep = "instrumental"
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HeaderBlock(title: "音频工作台", subtitle: "转换音乐、人声分离、克隆声音。常用操作尽量一处完成。")
+        HStack(alignment: .top, spacing: 20) {
+            VStack(alignment: .leading, spacing: 20) {
+                HeaderBlock(title: "音频工作台", subtitle: "转换音乐、人声分离、克隆声音。常用操作尽量一处完成。")
             if !state.qwenInstalled || !state.melInstalled || !state.qwenRuntimeInstalled || !state.separatorInstalled {
                 HStack(spacing: 14) {
                     Image(systemName: "arrow.down.circle")
@@ -1014,10 +1052,15 @@ struct WorkbenchView: View {
                 }
             }
 
-            Divider()
-            Text("任务").font(.headline)
-            TaskListView()
-            Spacer(minLength: 0)
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+            TaskSidebarView(modes: Set([
+                ToolMode.convert.rawValue,
+                ToolMode.separate.rawValue,
+                ToolMode.convertAndSeparate.rawValue
+            ]))
         }
     }
 
@@ -1030,10 +1073,10 @@ struct WorkbenchView: View {
 
     private var dropZone: some View {
         RoundedRectangle(cornerRadius: 18)
-            .fill(isTargeted ? Color.accentColor.opacity(0.12) : Color.white.opacity(0.035))
+            .fill(isTargeted ? Color.accentColor.opacity(0.12) : Color(nsColor: .controlBackgroundColor))
             .overlay(
                 RoundedRectangle(cornerRadius: 18)
-                    .strokeBorder(isTargeted ? Color.accentColor : Color.white.opacity(0.16),
+                    .strokeBorder(isTargeted ? Color.accentColor : Color(nsColor: .separatorColor),
                                   style: StrokeStyle(lineWidth: 1.2, dash: [8, 7]))
             )
             .overlay(
@@ -1085,8 +1128,9 @@ struct FileToolView: View {
     @AppStorage("separate.keep") private var separateKeep = "instrumental"
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HeaderBlock(title: title, subtitle: subtitle)
+        HStack(alignment: .top, spacing: 20) {
+            VStack(alignment: .leading, spacing: 20) {
+                HeaderBlock(title: title, subtitle: subtitle)
 
             if mode == .separate {
                 Picker("保留内容", selection: $separateKeep) {
@@ -1106,11 +1150,11 @@ struct FileToolView: View {
             )
 
             RoundedRectangle(cornerRadius: 18)
-                .fill(isTargeted ? Color.accentColor.opacity(0.12) : Color.white.opacity(0.035))
+                .fill(isTargeted ? Color.accentColor.opacity(0.12) : Color(nsColor: .controlBackgroundColor))
                 .overlay(
                     RoundedRectangle(cornerRadius: 18)
                         .strokeBorder(
-                            isTargeted ? Color.accentColor : Color.white.opacity(0.12),
+                            isTargeted ? Color.accentColor : Color(nsColor: .separatorColor),
                             style: StrokeStyle(lineWidth: 1.2, dash: [8, 7])
                         )
                 )
@@ -1170,8 +1214,11 @@ struct FileToolView: View {
                 Spacer()
             }
 
-            TaskListView()
-            Spacer()
+                Spacer()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+            TaskSidebarView(modes: Set([mode.rawValue]))
         }
     }
 
@@ -1228,58 +1275,84 @@ struct FileToolView: View {
 
 struct TaskListView: View {
     @EnvironmentObject var state: AppState
+    let modes: Set<String>?
+
+    init(modes: Set<String>? = nil) {
+        self.modes = modes
+    }
+
+    private var visibleTasks: [TaskItem] {
+        let filtered = state.tasks.filter { task in
+            guard let modes else { return true }
+            return modes.contains(task.mode)
+        }
+        return Array(filtered.prefix(30))
+    }
 
     var body: some View {
-        if state.tasks.isEmpty {
-            ContentUnavailableView("还没有任务", systemImage: "tray", description: Text("处理过的任务会显示在这里。"))
-                .frame(maxHeight: 180)
+        if visibleTasks.isEmpty {
+            ContentUnavailableView("还没有任务", systemImage: "tray", description: Text("等待、处理中和已完成任务都会显示在这里。"))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            List(state.tasks.prefix(20)) { task in
-                HStack(spacing: 12) {
-                    Image(systemName: icon(for: task.status))
-                        .foregroundStyle(color(for: task.status))
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(task.title).lineLimit(1)
-                        Text(task.detail.isEmpty ? task.mode : task.detail)
-                            .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            List(visibleTasks) { task in
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 9) {
+                        Image(systemName: icon(for: task.status))
+                            .foregroundStyle(color(for: task.status))
+                        Text(task.title)
+                            .font(.subheadline.weight(.medium))
+                            .lineLimit(1)
+                        Spacer()
+                        Text(task.status)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
-                    Spacer()
-                    Text(task.status).font(.caption).foregroundStyle(.secondary)
-                    if task.status == "失败" {
-                        Button {
-                            state.copyErrorText(task.detail)
-                        } label: {
-                            Image(systemName: "doc.on.doc")
-                        }
-                        .buttonStyle(.plain)
-                        .help("复制错误")
-                    }
-                    if task.outputPath != nil {
-                        Button {
-                            state.togglePreview(task.outputPath)
-                        } label: {
-                            Image(systemName:
-                                state.previewPath == task.outputPath && state.previewIsPlaying
-                                ? "pause.circle.fill"
-                                : "play.circle"
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .help(state.previewPath == task.outputPath && state.previewIsPlaying ? "暂停试听" : "试听")
 
-                        Button {
-                            state.reveal(task.outputPath)
-                        } label: {
-                            Image(systemName: "folder")
+                    Text(task.detail.isEmpty ? task.mode : task.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+
+                    HStack(spacing: 12) {
+                        Text(task.mode)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                        Spacer()
+                        if task.status == "失败" {
+                            Button {
+                                state.copyErrorText(task.detail)
+                            } label: {
+                                Image(systemName: "doc.on.doc")
+                            }
+                            .buttonStyle(.plain)
+                            .help("复制错误")
                         }
-                        .buttonStyle(.plain)
-                        .help("在 Finder 中显示")
+                        if task.outputPath != nil {
+                            Button {
+                                state.togglePreview(task.outputPath)
+                            } label: {
+                                Image(systemName:
+                                    state.previewPath == task.outputPath && state.previewIsPlaying
+                                    ? "pause.circle.fill"
+                                    : "play.circle"
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .help(state.previewPath == task.outputPath && state.previewIsPlaying ? "暂停试听" : "试听")
+
+                            Button {
+                                state.reveal(task.outputPath)
+                            } label: {
+                                Image(systemName: "folder")
+                            }
+                            .buttonStyle(.plain)
+                            .help("在 Finder 中显示")
+                        }
                     }
                 }
-                .padding(.vertical, 4)
+                .padding(.vertical, 5)
             }
             .listStyle(.inset)
-            .frame(minHeight: 190)
         }
     }
 
@@ -1302,6 +1375,58 @@ struct TaskListView: View {
     }
 }
 
+struct TaskSidebarView: View {
+    @EnvironmentObject var state: AppState
+    let modes: Set<String>?
+
+    init(modes: Set<String>? = nil) {
+        self.modes = modes
+    }
+
+    private var matchingTasks: [TaskItem] {
+        state.tasks.filter { task in
+            guard let modes else { return true }
+            return modes.contains(task.mode)
+        }
+    }
+
+    private var summary: String {
+        let running = matchingTasks.filter { $0.status == "处理中" }.count
+        let waiting = matchingTasks.filter { $0.status == "等待中" }.count
+        let history = matchingTasks.filter { $0.status == "完成" || $0.status == "失败" }.count
+        if running > 0 { return "处理中 \(running) · 等待 \(waiting) · 历史 \(history)" }
+        if waiting > 0 { return "等待 \(waiting) · 历史 \(history)" }
+        return history > 0 ? "历史 \(history)" : "暂无任务"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("任务队列").font(.headline)
+                Spacer()
+                Text(summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Divider()
+            TaskListView(modes: modes)
+            if !state.previewStatus.isEmpty {
+                Text(state.previewStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(14)
+        .frame(width: 340, alignment: .topLeading)
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14)
+                .strokeBorder(Color(nsColor: .separatorColor))
+        )
+    }
+}
+
 struct HeaderBlock: View {
     let title: String
     let subtitle: String
@@ -1320,13 +1445,15 @@ struct VoiceCloneView: View {
     @State private var temporaryRefText = ""
     @State private var text = "大家好，我是宋盼盼。这是一段 SPP Audio Studio 的声音克隆测试。如果你能自然地听到这句话，说明人声模板、模型和本地推理都已经正常工作。"
     @State private var showAdd = false
+    @State private var pendingDeleteVoice: VoiceTemplate?
     @AppStorage("clone.outputMode") private var outputMode = "default"
     @AppStorage("clone.outputDir") private var outputDir = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack {
-                HeaderBlock(title: "声音克隆", subtitle: "常用人声保存一次，以后选模板、粘文案、直接生成。")
+        HStack(alignment: .top, spacing: 20) {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack {
+                    HeaderBlock(title: "声音克隆", subtitle: "常用人声保存一次，以后选模板、粘文案、直接生成。")
                 Spacer()
                 Button("＋ 新建人声模板") { showAdd = true }
             }
@@ -1348,8 +1475,8 @@ struct VoiceCloneView: View {
                         }
                         .frame(width: 170, height: 95, alignment: .leading)
                         .padding(14)
-                        .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 15))
-                        .overlay(RoundedRectangle(cornerRadius: 15).strokeBorder(Color.white.opacity(0.12)))
+                        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 15))
+                        .overlay(RoundedRectangle(cornerRadius: 15).strokeBorder(Color(nsColor: .separatorColor)))
                     }
                     .buttonStyle(.plain)
                 }
@@ -1365,7 +1492,7 @@ struct VoiceCloneView: View {
             .foregroundStyle(.secondary)
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
 
             if temporaryRef != nil {
                 VStack(alignment: .leading, spacing: 6) {
@@ -1387,7 +1514,7 @@ struct VoiceCloneView: View {
                 .font(.system(size: 16))
                 .scrollContentBackground(.hidden)
                 .padding(10)
-                .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
                 .frame(minHeight: 180)
 
             VStack(alignment: .leading, spacing: 8) {
@@ -1426,15 +1553,10 @@ struct VoiceCloneView: View {
                         outputDir: effectiveCloneOutputDir
                     )
                 } label: {
-                    if state.voiceBusy {
-                        ProgressView().controlSize(.small)
-                        Text("生成中…")
-                    } else {
-                        Label("生成声音", systemImage: "waveform.badge.plus")
-                    }
+                    Label("生成声音", systemImage: "waveform.badge.plus")
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(state.voiceBusy || (outputMode == "custom" && outputDir.isEmpty))
+                .disabled(outputMode == "custom" && outputDir.isEmpty)
 
                 if let output = state.lastVoiceOutput {
                     Button {
@@ -1467,6 +1589,11 @@ struct VoiceCloneView: View {
                         }
                     }
                     Spacer()
+                    if !selected.isBundled {
+                        Button("删除模板", role: .destructive) {
+                            pendingDeleteVoice = selected
+                        }
+                    }
                     if !selected.isDefault {
                         Button("设为默认") { state.setDefaultVoice(selected.id) }
                     } else {
@@ -1474,11 +1601,34 @@ struct VoiceCloneView: View {
                     }
                 }
             }
-            Spacer()
+                Spacer()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+            TaskSidebarView(modes: Set(["声音克隆"]))
         }
         .sheet(isPresented: $showAdd) {
             AddVoiceSheet(isPresented: $showAdd)
                 .environmentObject(state)
+        }
+        .confirmationDialog(
+            "删除人声模板？",
+            isPresented: Binding(
+                get: { pendingDeleteVoice != nil },
+                set: { if !$0 { pendingDeleteVoice = nil } }
+            ),
+            presenting: pendingDeleteVoice
+        ) { voice in
+            Button("删除「\(voice.name)」", role: .destructive) {
+                state.deleteVoice(voice.id)
+                if selectedVoice == voice.id { selectedVoice = nil }
+                pendingDeleteVoice = nil
+            }
+            Button("取消", role: .cancel) {
+                pendingDeleteVoice = nil
+            }
+        } message: { _ in
+            Text("只会删除 SPP Audio Studio 保存的模板副本，不会删除你原始的参考音频。")
         }
         .onAppear {
             state.refreshVoices()
@@ -1538,7 +1688,7 @@ struct VoiceCloneView: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Circle()
-                        .fill(Color.white.opacity(0.09))
+                        .fill(Color.primary.opacity(0.08))
                         .frame(width: 34, height: 34)
                         .overlay(Text(String(voice.name.prefix(1))).fontWeight(.bold))
                     Spacer()
@@ -1552,11 +1702,11 @@ struct VoiceCloneView: View {
             }
             .frame(width: 170, height: 95, alignment: .leading)
             .padding(14)
-            .background(active ? Color.accentColor.opacity(0.16) : Color.white.opacity(0.035),
+            .background(active ? Color.accentColor.opacity(0.16) : Color(nsColor: .controlBackgroundColor),
                         in: RoundedRectangle(cornerRadius: 15))
             .overlay(
                 RoundedRectangle(cornerRadius: 15)
-                    .strokeBorder(active ? Color.accentColor : Color.white.opacity(0.12))
+                    .strokeBorder(active ? Color.accentColor : Color(nsColor: .separatorColor))
             )
         }
         .buttonStyle(.plain)
@@ -1754,7 +1904,7 @@ struct EnvironmentView: View {
                     }
                 }
                 .padding(16)
-                .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
 
                 Divider()
 
@@ -1772,7 +1922,7 @@ struct EnvironmentView: View {
                                     .foregroundStyle(.secondary)
                             }
                             .padding(14)
-                            .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
+                            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
                         }
                     }
                     .padding(.top, 10)
@@ -1839,8 +1989,8 @@ struct EnvironmentView: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.white.opacity(0.10)))
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color(nsColor: .separatorColor)))
     }
 
     private var runtimeCard: some View {
@@ -1920,7 +2070,7 @@ struct EnvironmentView: View {
                 .foregroundStyle(.secondary)
         }
         .padding(16)
-        .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
     }
 
     private var runtimeSummary: String {
@@ -1932,7 +2082,7 @@ struct EnvironmentView: View {
             .font(.caption.weight(.medium))
             .padding(.horizontal, 9)
             .padding(.vertical, 4)
-            .background(Color.white.opacity(0.07), in: Capsule())
+            .background(Color(nsColor: .controlBackgroundColor), in: Capsule())
             .foregroundStyle(installed ? .green : .orange)
     }
 
