@@ -10,6 +10,10 @@ Windows · macOS
 
 格式转换 · 人声分离 · 声音克隆
 
+**Stable · v1.0.0**
+
+[下载最新版本](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/latest)
+
 </div>
 
 ---
@@ -18,12 +22,14 @@ SPP Audio Studio 把常用的本地音频处理集中到一个简单的桌面应
 
 ## 下载
 
-前往 [Releases](https://github.com/ndsmansyj/SPP-Audio-Studio/releases) 下载对应平台的最新版本。
+前往 **[Latest Release](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/latest)** 下载对应平台版本。
 
-| 平台 | 支持情况 | 说明 |
+| 平台 | 安装包 | 运行要求 |
 | --- | --- | --- |
-| **Windows** | Windows 10 / 11 x64 | 便携 ZIP，AI 功能推荐 NVIDIA GPU |
-| **macOS** | Apple Silicon · macOS 14+ | DMG，本地运行 |
+| **Windows** | `SPPAudioStudio-1.0.0-win-x64.zip` | Windows 10 / 11 x64；AI 功能推荐 NVIDIA GPU |
+| **macOS** | `SPP-Audio-Studio-1.0.0.dmg` | Apple Silicon · macOS 14+ |
+
+Release Assets 同时提供 SHA-256 校验文件。
 
 > 首次使用 AI 功能时，需要在「模型与环境」页面下载对应模型与运行环境。
 
@@ -36,11 +42,11 @@ SPP Audio Studio 把常用的本地音频处理集中到一个简单的桌面应
 
 ## 特点
 
-- **双端支持**：同一项目同时维护 Windows 与 macOS 版本。
+- **双端正式版**：Windows 与 macOS 均已进入 1.0。
 - **本地优先**：素材和 AI 推理尽量在本机完成。
 - **源文件只读**：不覆盖原始音频，同名输出自动生成新文件名。
+- **统一工作流**：转换、分离、声音克隆、试听与任务队列集中在一个应用中。
 - **模型管理**：模型与运行环境可在应用内安装、检查和切换。
-- **创作者工作流**：转换、分离、声音克隆、试听与输出集中在一个应用中。
 - **可诊断**：遇到问题可以复制诊断信息，便于反馈与排查。
 
 ## Windows
