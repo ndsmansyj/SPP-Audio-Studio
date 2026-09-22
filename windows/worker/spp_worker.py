@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import hashlib
 import json
@@ -13,7 +14,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, quote_plus
 
 # The WinUI host reads Worker stdout/stderr as UTF-8. Force the frozen
 # interpreter to use the same encoding instead of the active Windows code page.
@@ -114,7 +115,9 @@ MEL_SITE = MEL_RUNTIME_DIR / "site-packages"
 ASR_RUNTIME_DIR = RUNTIME_DIR / "asr"
 ASR_SITE = ASR_RUNTIME_DIR / "site-packages"
 
-PYTORCH_CUDA_INDEX = "https://download.pytorch.org/whl/cu126"
+PYTORCH_CUDA_OFFICIAL = "https://download.pytorch.org/whl/cu126"
+PYTORCH_CUDA_SJTU = "https://mirror.sjtu.edu.cn/pytorch-wheels/cu126"
+PYTORCH_CUDA_INDEX = PYTORCH_CUDA_OFFICIAL
 PYTORCH_CUDA_PACKAGES = ["torch==2.11.0+cu126", "torchaudio==2.11.0+cu126"]
 QWEN_RUNTIME_PACKAGES = PYTORCH_CUDA_PACKAGES + ["qwen-tts==0.1.1", "soundfile>=0.12", "imageio-ffmpeg>=0.6"]
 ASR_RUNTIME_PACKAGES = ["faster-whisper==1.2.1", "ctranslate2==4.8.2", "imageio-ffmpeg>=0.6"]
@@ -132,6 +135,8 @@ MEL_RUNTIME_DEPS = [
 ]
 PYPI_OFFICIAL = "https://pypi.org/simple"
 PYPI_MIRROR = "https://pypi.tuna.tsinghua.edu.cn/simple"
+PYPI_USTC = "https://mirrors.ustc.edu.cn/pypi/simple"
+PYPI_ALIYUN = "https://mirrors.aliyun.com/pypi/simple"
 
 QWEN_REPO = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 QWEN_REVISION = "fd4b254389122332181a7c3db7f27e918eec64e3"
@@ -141,6 +146,9 @@ WHISPER_REPO = "mobiuslabsgmbh/faster-whisper-large-v3-turbo"
 WHISPER_REVISION = "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf"
 HF_OFFICIAL = "https://huggingface.co"
 HF_MIRROR = "https://hf-mirror.com"
+MODELSCOPE_ENDPOINT = "https://modelscope.cn"
+AUTO_PROBE_BYTES = 512 * 1024
+AUTO_PROBE_TIMEOUT_SECONDS = 6
 
 QWEN_FILES = {
     "config.json": {"size": 4494, "sha256": None},
@@ -729,11 +737,173 @@ def cmd_model_storage(args: argparse.Namespace) -> int:
 
 
 def _pypi_endpoint_order(source: str) -> list[str]:
+    domestic = [PYPI_MIRROR, PYPI_USTC, PYPI_ALIYUN]
     if source == "mirror":
-        return [PYPI_MIRROR, PYPI_OFFICIAL]
+        return domestic + [PYPI_OFFICIAL]
     if source == "official":
-        return [PYPI_OFFICIAL, PYPI_MIRROR]
-    return [PYPI_MIRROR, PYPI_OFFICIAL]
+        return [PYPI_OFFICIAL] + domestic
+    return domestic + [PYPI_OFFICIAL]
+
+
+def _probe_pypi_endpoint(curl: str, endpoint: str) -> dict:
+    url = endpoint.rstrip("/") + "/pip/"
+    cmd = [
+        curl, "-L", "--fail", "--silent", "--show-error",
+        "--connect-timeout", "3",
+        "--max-time", str(AUTO_PROBE_TIMEOUT_SECONDS),
+        "--range", "0-131071",
+        "-o", os.devnull,
+        "-w", "%{size_download}|%{time_total}|%{http_code}",
+        url,
+    ]
+    started = time.monotonic()
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    elapsed = max(time.monotonic() - started, 0.001)
+    downloaded = 0
+    seconds = elapsed
+    http_code = 0
+    try:
+        size_text, time_text, code_text = (proc.stdout or "").strip().split("|")[-3:]
+        downloaded = int(float(size_text))
+        seconds = max(float(time_text), 0.001)
+        http_code = int(code_text)
+    except (TypeError, ValueError):
+        pass
+    ok = proc.returncode == 0 and downloaded > 0 and 200 <= http_code < 400
+    return {
+        "endpoint": endpoint,
+        "ok": ok,
+        "bytes": downloaded,
+        "seconds": seconds,
+        "bps": (downloaded / seconds) if ok else 0.0,
+        "http_code": http_code,
+    }
+
+
+def _resolve_pypi_endpoint_order(source: str, runtime: str) -> list[str]:
+    if source != "auto":
+        return _pypi_endpoint_order(source)
+
+    curl = shutil.which("curl")
+    if not curl:
+        return _pypi_endpoint_order("mirror")
+
+    domestic = [PYPI_MIRROR, PYPI_USTC, PYPI_ALIYUN]
+    endpoints = domestic + [PYPI_OFFICIAL]
+    print(json.dumps({
+        "event": "runtime_source_probe_start",
+        "runtime": runtime,
+        "endpoints": endpoints,
+    }, ensure_ascii=False), flush=True)
+
+    with ThreadPoolExecutor(max_workers=len(endpoints)) as pool:
+        results = list(pool.map(lambda endpoint: _probe_pypi_endpoint(curl, endpoint), endpoints))
+
+    for result in results:
+        print(json.dumps({
+            "event": "runtime_source_probe_result",
+            "runtime": runtime,
+            **result,
+        }, ensure_ascii=False), flush=True)
+
+    by_endpoint = {result["endpoint"]: result for result in results}
+    domestic_ok = [by_endpoint[e] for e in domestic if by_endpoint.get(e, {}).get("ok")]
+    official = by_endpoint.get(PYPI_OFFICIAL, {"bps": 0.0, "ok": False})
+    best_domestic = max(domestic_ok, key=lambda item: item["bps"]) if domestic_ok else None
+
+    if best_domestic and (not official["ok"] or best_domestic["bps"] >= official["bps"] * 0.85):
+        primary = best_domestic["endpoint"]
+    elif official["ok"]:
+        primary = PYPI_OFFICIAL
+    else:
+        primary = PYPI_MIRROR
+
+    remaining = [endpoint for endpoint in endpoints if endpoint != primary]
+    remaining.sort(key=lambda endpoint: by_endpoint.get(endpoint, {}).get("bps", 0.0), reverse=True)
+    order = [primary] + remaining
+
+    selected = by_endpoint.get(primary, {})
+    print(json.dumps({
+        "event": "runtime_source_selected",
+        "runtime": runtime,
+        "endpoint": primary,
+        "bps": selected.get("bps", 0.0),
+        "fallback": order[1] if len(order) > 1 else "",
+    }, ensure_ascii=False), flush=True)
+    return order
+
+
+def _probe_pytorch_endpoint(curl: str, endpoint: str) -> dict:
+    url = endpoint.rstrip("/") + "/torch/"
+    started = time.monotonic()
+    proc = subprocess.run(
+        [curl, "-L", "--fail", "--silent", "--show-error",
+         "--connect-timeout", "3", "--max-time", str(AUTO_PROBE_TIMEOUT_SECONDS), url],
+        capture_output=True, text=True, check=False,
+    )
+    elapsed = max(time.monotonic() - started, 0.001)
+    body = proc.stdout or ""
+    required = "torch-2.11.0+cu126-cp311-cp311-win_amd64.whl"
+    required_encoded = "torch-2.11.0%2Bcu126-cp311-cp311-win_amd64.whl"
+    compatible = required in body or required_encoded in body
+    downloaded = len(body.encode("utf-8"))
+    ok = proc.returncode == 0 and compatible and downloaded > 0
+    return {
+        "endpoint": endpoint,
+        "ok": ok,
+        "bytes": downloaded,
+        "seconds": elapsed,
+        "bps": (downloaded / elapsed) if ok else 0.0,
+        "compatible": compatible,
+    }
+
+
+def _resolve_pytorch_endpoint_order(source: str, runtime: str) -> list[str]:
+    if source == "official":
+        return [PYTORCH_CUDA_OFFICIAL, PYTORCH_CUDA_SJTU]
+    if source == "mirror":
+        return [PYTORCH_CUDA_SJTU, PYTORCH_CUDA_OFFICIAL]
+
+    curl = shutil.which("curl")
+    if not curl:
+        return [PYTORCH_CUDA_SJTU, PYTORCH_CUDA_OFFICIAL]
+
+    endpoints = [PYTORCH_CUDA_SJTU, PYTORCH_CUDA_OFFICIAL]
+    print(json.dumps({
+        "event": "torch_source_probe_start",
+        "runtime": runtime,
+        "endpoints": endpoints,
+    }, ensure_ascii=False), flush=True)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda endpoint: _probe_pytorch_endpoint(curl, endpoint), endpoints))
+
+    for result in results:
+        print(json.dumps({
+            "event": "torch_source_probe_result",
+            "runtime": runtime,
+            **result,
+        }, ensure_ascii=False), flush=True)
+
+    by_endpoint = {result["endpoint"]: result for result in results}
+    sjtu = by_endpoint.get(PYTORCH_CUDA_SJTU, {"ok": False, "bps": 0.0})
+    official = by_endpoint.get(PYTORCH_CUDA_OFFICIAL, {"ok": False, "bps": 0.0})
+    if sjtu["ok"] and (not official["ok"] or sjtu["bps"] >= official["bps"] * 0.85):
+        order = [PYTORCH_CUDA_SJTU, PYTORCH_CUDA_OFFICIAL]
+    elif official["ok"]:
+        order = [PYTORCH_CUDA_OFFICIAL, PYTORCH_CUDA_SJTU]
+    else:
+        order = [PYTORCH_CUDA_SJTU, PYTORCH_CUDA_OFFICIAL]
+
+    selected = by_endpoint.get(order[0], {})
+    print(json.dumps({
+        "event": "torch_source_selected",
+        "runtime": runtime,
+        "endpoint": order[0],
+        "bps": selected.get("bps", 0.0),
+        "fallback": order[1],
+    }, ensure_ascii=False), flush=True)
+    return order
 
 
 def _verify_python_import(kind: str, site: Path) -> subprocess.CompletedProcess:
@@ -794,8 +964,11 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
 
     final_dir = {"qwen": QWEN_RUNTIME_DIR, "mel": MEL_RUNTIME_DIR, "asr": ASR_RUNTIME_DIR}[kind]
     errors: list[str] = []
+    endpoint_order = _resolve_pypi_endpoint_order(source, kind)
+    torch_order = _resolve_pytorch_endpoint_order(source, kind) if kind in ("qwen", "mel") else [None]
+    attempts = [(endpoint, torch_endpoint) for endpoint in endpoint_order for torch_endpoint in torch_order]
 
-    for endpoint in _pypi_endpoint_order(source):
+    for endpoint, torch_endpoint in attempts:
         temp_dir = Path(tempfile.mkdtemp(prefix=f"runtime-{kind}-", dir=CACHE_DIR))
         site = temp_dir / "site-packages"
         site.mkdir(parents=True, exist_ok=True)
@@ -804,6 +977,7 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
             "event": "runtime_install_start",
             "runtime": kind,
             "index": endpoint,
+            "torch_index": torch_endpoint,
             "packages": packages,
         }, ensure_ascii=False), flush=True)
 
@@ -817,8 +991,8 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
                 "--target", str(site),
                 "--index-url", endpoint,
             ])
-            if kind in ("qwen", "mel"):
-                cmd += ["--extra-index-url", PYTORCH_CUDA_INDEX]
+            if kind in ("qwen", "mel") and torch_endpoint:
+                cmd += ["--extra-index-url", torch_endpoint]
             if no_deps:
                 cmd.append("--no-deps")
             cmd += step_packages
@@ -829,7 +1003,8 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
                 "PYTHONNOUSERSITE": "1",
             })
             if proc.returncode != 0:
-                errors.append(f"{endpoint}: pip exit {proc.returncode}: {(proc.stderr or proc.stdout)[-800:]}")
+                source_label = endpoint if not torch_endpoint else f"{endpoint} + {torch_endpoint}"
+                errors.append(f"{source_label}: pip exit {proc.returncode}: {(proc.stderr or proc.stdout)[-800:]}")
                 install_failed = True
                 break
 
@@ -880,6 +1055,7 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
             "python": str(PYTHON_CORE),
             "packages": packages,
             "source": endpoint,
+            "torch_source": torch_endpoint,
         }
         (temp_dir / "installed.json").write_text(
             json.dumps(marker, ensure_ascii=False, indent=2),
@@ -896,6 +1072,7 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
             "runtime": kind,
             "path": str(final_dir),
             "index": endpoint,
+            "torch_index": torch_endpoint,
         }, ensure_ascii=False), flush=True)
         return emit({"ok": True, "runtime": kind, "installed": True, "path": str(final_dir)})
 
@@ -913,6 +1090,111 @@ def _endpoint_order(source: str) -> list[str]:
     return [HF_MIRROR, HF_OFFICIAL]
 
 
+def _model_download_url(endpoint: str, repo: str, revision: str, relpath: str) -> str:
+    if endpoint == MODELSCOPE_ENDPOINT:
+        return (
+            f"{endpoint}/api/v1/models/{repo}/repo"
+            f"?Revision=master&FilePath={quote_plus(relpath)}"
+        )
+    return f"{endpoint}/{repo}/resolve/{revision}/{quote(relpath, safe='/')}"
+
+
+def _probe_hf_endpoint(curl: str, endpoint: str, repo: str, revision: str, relpath: str) -> dict:
+    url = _model_download_url(endpoint, repo, revision, relpath)
+    cmd = [
+        curl, "-L", "--fail", "--silent", "--show-error",
+        "--connect-timeout", "3",
+        "--max-time", str(AUTO_PROBE_TIMEOUT_SECONDS),
+        "--range", f"0-{AUTO_PROBE_BYTES - 1}",
+        "-o", os.devnull,
+        "-w", "%{size_download}|%{time_total}|%{http_code}",
+        url,
+    ]
+    started = time.monotonic()
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    elapsed = max(time.monotonic() - started, 0.001)
+    downloaded = 0
+    seconds = elapsed
+    http_code = 0
+    try:
+        size_text, time_text, code_text = (proc.stdout or "").strip().split("|")[-3:]
+        downloaded = int(float(size_text))
+        seconds = max(float(time_text), 0.001)
+        http_code = int(code_text)
+    except (TypeError, ValueError):
+        pass
+    ok = proc.returncode == 0 and downloaded > 0 and 200 <= http_code < 400
+    return {
+        "endpoint": endpoint,
+        "ok": ok,
+        "bytes": downloaded,
+        "seconds": seconds,
+        "bps": (downloaded / seconds) if ok else 0.0,
+        "http_code": http_code,
+    }
+
+
+def _resolve_model_endpoint_order(source: str, repo: str, revision: str, files: dict, model: str) -> list[str]:
+    if source != "auto":
+        return _endpoint_order(source)
+
+    curl = shutil.which("curl")
+    if not curl:
+        return [MODELSCOPE_ENDPOINT, HF_MIRROR, HF_OFFICIAL] if repo == QWEN_REPO else [HF_MIRROR, HF_OFFICIAL]
+
+    probe_relpath = max(files.items(), key=lambda item: item[1].get("size", 0))[0]
+    domestic = [HF_MIRROR]
+    if repo == QWEN_REPO:
+        domestic.insert(0, MODELSCOPE_ENDPOINT)
+    endpoints = domestic + [HF_OFFICIAL]
+
+    print(json.dumps({
+        "event": "source_probe_start",
+        "model": model,
+        "file": probe_relpath,
+        "endpoints": endpoints,
+    }, ensure_ascii=False), flush=True)
+
+    with ThreadPoolExecutor(max_workers=len(endpoints)) as pool:
+        results = list(pool.map(
+            lambda endpoint: _probe_hf_endpoint(curl, endpoint, repo, revision, probe_relpath),
+            endpoints,
+        ))
+
+    for result in results:
+        print(json.dumps({
+            "event": "source_probe_result",
+            "model": model,
+            **result,
+        }, ensure_ascii=False), flush=True)
+
+    by_endpoint = {result["endpoint"]: result for result in results}
+    domestic_ok = [by_endpoint[e] for e in domestic if by_endpoint.get(e, {}).get("ok")]
+    official = by_endpoint.get(HF_OFFICIAL, {"bps": 0.0, "ok": False})
+    best_domestic = max(domestic_ok, key=lambda item: item["bps"]) if domestic_ok else None
+
+    if best_domestic and (not official["ok"] or best_domestic["bps"] >= official["bps"] * 0.85):
+        primary = best_domestic["endpoint"]
+    elif official["ok"]:
+        primary = HF_OFFICIAL
+    else:
+        primary = domestic[0]
+
+    remaining = [endpoint for endpoint in endpoints if endpoint != primary]
+    remaining.sort(key=lambda endpoint: by_endpoint.get(endpoint, {}).get("bps", 0.0), reverse=True)
+    order = [primary] + remaining
+
+    selected = by_endpoint.get(primary, {})
+    print(json.dumps({
+        "event": "source_selected",
+        "model": model,
+        "endpoint": primary,
+        "bps": selected.get("bps", 0.0),
+        "fallback": order[1] if len(order) > 1 else "",
+    }, ensure_ascii=False), flush=True)
+    return order
+
+
 def _download_one(
     repo: str,
     revision: str,
@@ -924,6 +1206,7 @@ def _download_one(
     model: str,
     completed_before: int,
     model_total: int,
+    endpoint_order: list[str] | None = None,
 ) -> int:
     curl = shutil.which("curl")
     if not curl:
@@ -957,8 +1240,8 @@ def _download_one(
 
     part = target.with_suffix(target.suffix + ".part")
     errors = []
-    for endpoint in _endpoint_order(source):
-        url = f"{endpoint}/{repo}/resolve/{revision}/{quote(relpath, safe='/')}"
+    for endpoint in (endpoint_order or _endpoint_order(source)):
+        url = _model_download_url(endpoint, repo, revision, relpath)
         print(json.dumps({
             "event": "download_start", "model": model, "file": relpath,
             "endpoint": endpoint, "expected_bytes": expected_size,
@@ -1015,6 +1298,7 @@ def cmd_model_download(args: argparse.Namespace) -> int:
             "event": "model_begin", "model": args.model,
             "repo": repo, "total_bytes": total, "source": source
         }, ensure_ascii=False), flush=True)
+        endpoint_order = _resolve_model_endpoint_order(source, repo, revision, files, args.model)
         completed = 0
         for relpath, metadata in files.items():
             completed += _download_one(
@@ -1027,6 +1311,7 @@ def cmd_model_download(args: argparse.Namespace) -> int:
                 model=args.model,
                 completed_before=completed,
                 model_total=total,
+                endpoint_order=endpoint_order,
             )
         print(json.dumps({
             "event": "model_done", "model": args.model,
@@ -1143,6 +1428,35 @@ def cmd_voice_default(args: argparse.Namespace) -> int:
     return emit({"ok": True, "default_voice": args.id})
 
 
+def cmd_voice_delete(args: argparse.Namespace) -> int:
+    ensure_dirs()
+    root = VOICE_DIR.resolve()
+    folder = (VOICE_DIR / args.id).resolve()
+    if folder.parent != root:
+        return emit({"ok": False, "error": "无效的人声模板 ID"}, 2)
+    cfg_path = folder / "config.json"
+    if not cfg_path.is_file():
+        return emit({"ok": False, "error": f"人声模板不存在：{args.id}"}, 2)
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except Exception:
+        return emit({"ok": False, "error": "人声模板配置损坏，无法安全删除"}, 2)
+    if cfg.get("bundled"):
+        return emit({"ok": False, "error": "内置人声模板不能删除"}, 2)
+
+    settings = load_settings()
+    was_default = settings.get("default_voice") == args.id
+    shutil.rmtree(folder)
+    if was_default:
+        remaining = read_templates()
+        if remaining:
+            settings["default_voice"] = remaining[0]["id"]
+        else:
+            settings.pop("default_voice", None)
+        save_settings(settings)
+    return emit({"ok": True, "deleted": args.id})
+
+
 def cmd_voice_clone(args: argparse.Namespace) -> int:
     folder = VOICE_DIR / args.id
     cfg_path = folder / "config.json"
@@ -1212,6 +1526,10 @@ def build_parser() -> argparse.ArgumentParser:
     vd = sub.add_parser("voice-default")
     vd.add_argument("id")
     vd.set_defaults(func=cmd_voice_default)
+
+    vdel = sub.add_parser("voice-delete")
+    vdel.add_argument("id")
+    vdel.set_defaults(func=cmd_voice_delete)
 
     vc = sub.add_parser("voice-clone")
     vc.add_argument("id")

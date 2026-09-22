@@ -59,6 +59,23 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(listed["templates"][0]["default"])
         self.assertTrue((Path(saved["folder"]) / "reference.wav").is_file())
 
+    def test_voice_delete_removes_saved_template_and_default_reference(self):
+        ref = Path(self.tmp.name) / "sample.wav"
+        ref.write_bytes(b"RIFFmock")
+        code, saved = self.call("voice-save", "--name", "可删除声音", "--ref-audio", str(ref),
+                                "--ref-text", "你好", "--default")
+        self.assertEqual(code, 0)
+        voice_id = saved["template"]["id"]
+
+        code, deleted = self.call("voice-delete", voice_id)
+        self.assertEqual(code, 0)
+        self.assertTrue(deleted["ok"])
+        self.assertFalse(Path(saved["folder"]).exists())
+
+        code, listed = self.call("voice-list")
+        self.assertEqual(code, 0)
+        self.assertEqual(listed["templates"], [])
+
     def test_download_source_persists(self):
         self.assertEqual(self.call("download-source", "official")[1]["download_source"], "official")
         self.assertEqual(self.call("model-status")[1]["download_source"], "official")
@@ -117,6 +134,53 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(json.loads(response.read())["ok"])
         conn.close()
 
+    def test_local_api_agent_capabilities_and_async_task_lifecycle(self):
+        environment = patch.dict(os.environ, self.env)
+        environment.start()
+        self.addCleanup(environment.stop)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("win_local_api_async", API)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        calls = []
+        module.run_worker = lambda args: calls.append(args) or {"ok": True, "output": "C:/out/result.wav"}
+
+        from http.server import ThreadingHTTPServer
+        server = ThreadingHTTPServer(("127.0.0.1", 0), module.handler_factory("secret"))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        headers = {"Authorization": "Bearer secret"}
+
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=10)
+        conn.request("GET", "/v1/capabilities", headers=headers)
+        response = conn.getresponse()
+        self.assertEqual(response.status, 200)
+        caps = json.loads(response.read())
+        self.assertEqual(caps["api_version"], "1.1")
+        self.assertIn("convert_audio", caps["actions"])
+        conn.close()
+
+        payload = json.dumps({"action": "convert_audio", "input": "C:/in/demo.m4a"}).encode()
+        headers_json = {**headers, "Content-Type": "application/json", "Content-Length": str(len(payload))}
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=10)
+        conn.request("POST", "/v1/tasks", body=payload, headers=headers_json)
+        response = conn.getresponse()
+        self.assertEqual(response.status, 202)
+        task_id = json.loads(response.read())["task"]["id"]
+        conn.close()
+
+        module.FUTURES[task_id].result(timeout=2)
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=10)
+        conn.request("GET", f"/v1/tasks/{task_id}", headers=headers)
+        response = conn.getresponse()
+        task = json.loads(response.read())["task"]
+        self.assertEqual(task["status"], "completed")
+        self.assertEqual(task["result"]["output"], "C:/out/result.wav")
+        self.assertEqual(calls, [["convert", "C:/in/demo.m4a"]])
+        conn.close()
+
     def test_runtime_manifests_are_windows_backends(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location("win_worker", WORKER)
@@ -134,6 +198,70 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(worker.WHISPER_REVISION, "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf")
         self.assertEqual(worker.QWEN_FILES["model.safetensors"]["sha256"], "38fc7fc51c5e776e840414b6fd443962e9411b9654888fd7913e4da643cb857c")
         self.assertIsNone(worker.QWEN_FILES["config.json"]["sha256"])
+
+    def test_qwen_auto_download_can_select_modelscope(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("win_worker_auto_modelscope", WORKER)
+        worker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(worker)
+        files = {"model.safetensors": {"size": 100, "sha256": None}}
+
+        def fake_probe(_curl, endpoint, _repo, _revision, _relpath):
+            speeds = {
+                worker.MODELSCOPE_ENDPOINT: 95.0,
+                worker.HF_MIRROR: 80.0,
+                worker.HF_OFFICIAL: 100.0,
+            }
+            return {"endpoint": endpoint, "ok": True, "bytes": 100, "seconds": 1.0, "bps": speeds[endpoint], "http_code": 206}
+
+        with patch.object(worker.shutil, "which", return_value="C:/tools/curl.exe"), \
+             patch.object(worker, "_probe_hf_endpoint", side_effect=fake_probe):
+            order = worker._resolve_model_endpoint_order(
+                "auto", worker.QWEN_REPO, worker.QWEN_REVISION, files, "qwen"
+            )
+
+        self.assertEqual(order[0], worker.MODELSCOPE_ENDPOINT)
+        self.assertCountEqual(order, [worker.MODELSCOPE_ENDPOINT, worker.HF_MIRROR, worker.HF_OFFICIAL])
+        url = worker._model_download_url(
+            worker.MODELSCOPE_ENDPOINT, worker.QWEN_REPO, worker.QWEN_REVISION, "speech_tokenizer/model.safetensors"
+        )
+        self.assertIn("/api/v1/models/Qwen/Qwen3-TTS-12Hz-1.7B-Base/repo", url)
+        self.assertIn("Revision=master", url)
+        self.assertIn("FilePath=speech_tokenizer%2Fmodel.safetensors", url)
+
+    def test_auto_download_prefers_mirror_when_speed_is_close(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("win_worker_auto_mirror", WORKER)
+        worker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(worker)
+        files = {"model.safetensors": {"size": 100, "sha256": None}}
+
+        def fake_probe(_curl, endpoint, _repo, _revision, _relpath):
+            bps = 90.0 if endpoint == worker.HF_MIRROR else 100.0
+            return {"endpoint": endpoint, "ok": True, "bytes": 100, "seconds": 1.0, "bps": bps, "http_code": 206}
+
+        with patch.object(worker.shutil, "which", return_value="C:/tools/curl.exe"), \
+             patch.object(worker, "_probe_hf_endpoint", side_effect=fake_probe):
+            order = worker._resolve_model_endpoint_order("auto", "a/b", "rev", files, "qwen")
+
+        self.assertEqual(order, [worker.HF_MIRROR, worker.HF_OFFICIAL])
+
+    def test_auto_download_uses_official_when_materially_faster(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("win_worker_auto_official", WORKER)
+        worker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(worker)
+        files = {"model.safetensors": {"size": 100, "sha256": None}}
+
+        def fake_probe(_curl, endpoint, _repo, _revision, _relpath):
+            bps = 40.0 if endpoint == worker.HF_MIRROR else 100.0
+            return {"endpoint": endpoint, "ok": True, "bytes": 100, "seconds": 1.0, "bps": bps, "http_code": 206}
+
+        with patch.object(worker.shutil, "which", return_value="C:/tools/curl.exe"), \
+             patch.object(worker, "_probe_hf_endpoint", side_effect=fake_probe):
+            order = worker._resolve_model_endpoint_order("auto", "a/b", "rev", files, "qwen")
+
+        self.assertEqual(order, [worker.HF_OFFICIAL, worker.HF_MIRROR])
 
     def test_download_resumes_with_discovered_curl_and_falls_back(self):
         import importlib.util
@@ -190,6 +318,82 @@ class WorkerTests(unittest.TestCase):
                     model="qwen", completed_before=0, model_total=len(payload),
                 )
         self.assertFalse(target.exists())
+
+    def test_auto_runtime_source_prefers_china_mirror_when_close(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("win_worker_runtime_auto_mirror", WORKER)
+        worker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(worker)
+
+        def fake_probe(_curl, endpoint):
+            speeds = {
+                worker.PYPI_MIRROR: 90.0,
+                worker.PYPI_USTC: 80.0,
+                worker.PYPI_ALIYUN: 70.0,
+                worker.PYPI_OFFICIAL: 100.0,
+            }
+            return {"endpoint": endpoint, "ok": True, "bytes": 100, "seconds": 1.0, "bps": speeds[endpoint], "http_code": 206}
+
+        with patch.object(worker.shutil, "which", return_value="C:/tools/curl.exe"), \
+             patch.object(worker, "_probe_pypi_endpoint", side_effect=fake_probe):
+            order = worker._resolve_pypi_endpoint_order("auto", "qwen")
+
+        self.assertEqual(order[0], worker.PYPI_MIRROR)
+        self.assertCountEqual(order, [worker.PYPI_MIRROR, worker.PYPI_USTC, worker.PYPI_ALIYUN, worker.PYPI_OFFICIAL])
+
+    def test_auto_runtime_source_uses_official_when_materially_faster(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("win_worker_runtime_auto_official", WORKER)
+        worker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(worker)
+
+        def fake_probe(_curl, endpoint):
+            speeds = {
+                worker.PYPI_MIRROR: 40.0,
+                worker.PYPI_USTC: 30.0,
+                worker.PYPI_ALIYUN: 20.0,
+                worker.PYPI_OFFICIAL: 100.0,
+            }
+            return {"endpoint": endpoint, "ok": True, "bytes": 100, "seconds": 1.0, "bps": speeds[endpoint], "http_code": 206}
+
+        with patch.object(worker.shutil, "which", return_value="C:/tools/curl.exe"), \
+             patch.object(worker, "_probe_pypi_endpoint", side_effect=fake_probe):
+            order = worker._resolve_pypi_endpoint_order("auto", "qwen")
+
+        self.assertEqual(order[0], worker.PYPI_OFFICIAL)
+        self.assertCountEqual(order, [worker.PYPI_MIRROR, worker.PYPI_USTC, worker.PYPI_ALIYUN, worker.PYPI_OFFICIAL])
+
+    def test_auto_pytorch_source_prefers_sjtu_when_speed_is_close(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("win_worker_torch_auto_sjtu", WORKER)
+        worker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(worker)
+
+        def fake_probe(_curl, endpoint):
+            bps = 90.0 if endpoint == worker.PYTORCH_CUDA_SJTU else 100.0
+            return {"endpoint": endpoint, "ok": True, "bytes": 100, "seconds": 1.0, "bps": bps, "compatible": True}
+
+        with patch.object(worker.shutil, "which", return_value="C:/tools/curl.exe"), \
+             patch.object(worker, "_probe_pytorch_endpoint", side_effect=fake_probe):
+            order = worker._resolve_pytorch_endpoint_order("auto", "qwen")
+
+        self.assertEqual(order, [worker.PYTORCH_CUDA_SJTU, worker.PYTORCH_CUDA_OFFICIAL])
+
+    def test_auto_pytorch_source_uses_official_when_materially_faster(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("win_worker_torch_auto_official", WORKER)
+        worker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(worker)
+
+        def fake_probe(_curl, endpoint):
+            bps = 40.0 if endpoint == worker.PYTORCH_CUDA_SJTU else 100.0
+            return {"endpoint": endpoint, "ok": True, "bytes": 100, "seconds": 1.0, "bps": bps, "compatible": True}
+
+        with patch.object(worker.shutil, "which", return_value="C:/tools/curl.exe"), \
+             patch.object(worker, "_probe_pytorch_endpoint", side_effect=fake_probe):
+            order = worker._resolve_pytorch_endpoint_order("auto", "qwen")
+
+        self.assertEqual(order, [worker.PYTORCH_CUDA_OFFICIAL, worker.PYTORCH_CUDA_SJTU])
 
     def test_runtime_detection_uses_qwen_tts_and_faster_whisper(self):
         import importlib.util
@@ -260,6 +464,8 @@ class WorkerTests(unittest.TestCase):
         with patch.object(worker, "CACHE_DIR", Path(self.tmp.name)), \
              patch.object(worker, "QWEN_RUNTIME_DIR", Path(self.tmp.name) / "managed"), \
              patch.object(worker, "_runtime_installed", return_value=False), \
+             patch.object(worker, "_resolve_pypi_endpoint_order", return_value=[worker.PYPI_MIRROR, worker.PYPI_OFFICIAL]), \
+             patch.object(worker, "_resolve_pytorch_endpoint_order", return_value=[worker.PYTORCH_CUDA_OFFICIAL]), \
              patch.object(worker, "run_capture", side_effect=fake_run):
             result = worker.cmd_runtime_install(worker.build_parser().parse_args(["runtime-install", "qwen"]))
         self.assertEqual(result, 0)
@@ -399,6 +605,10 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(generated[0]["ref_text"], "你好")
         self.assertEqual(generated[0]["ref_audio"].endswith("reference.wav"), True)
         self.assertEqual(generated[0]["top_k"], 50)
+        outputs = [path.name for path in Path(self.tmp.name).glob("声音_*.wav")]
+        self.assertEqual(len(outputs), 1)
+        self.assertNotIn("t0.9", outputs[0])
+        self.assertNotIn("AI Clone", outputs[0])
 
     def test_qwen_bridge_refuses_cpu_fallback(self):
         import importlib.util

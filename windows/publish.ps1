@@ -85,12 +85,18 @@ try {
                 Copy-Item $source (Join-Path $workerOutput $name) -Recurse -Force
             }
         }
-        foreach ($name in @('qwen_bridge.py', 'mel_bridge.py')) {
+        foreach ($name in @('qwen_bridge.py', 'mel_bridge.py', 'local_api.py')) {
             $source = Join-Path $workerRoot $name
             if (Test-Path $source -PathType Leaf) {
                 Copy-Item $source (Join-Path $workerOutput $name) -Force
             }
         }
+
+        $agentLauncherSource = Join-Path $workerRoot 'start_agent_api.cmd'
+        if (-not (Test-Path $agentLauncherSource -PathType Leaf)) {
+            throw "Agent API launcher not found: $agentLauncherSource"
+        }
+        Copy-Item $agentLauncherSource (Join-Path $publishRoot 'SPP Agent API.cmd') -Force
 
         $defaultVoiceSource = Join-Path $RepoRoot 'assets\default_voice'
         if (-not (Test-Path $defaultVoiceSource -PathType Container)) {

@@ -150,8 +150,7 @@ def main() -> int:
             raise RuntimeError("Qwen 生成完成但没有找到输出 WAV")
 
         stem = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", args.text)[:10] or "clone"
-        params = f"t{args.temperature:.1f}p{args.top_p:.1f}k{args.top_k}r{args.repetition_penalty:.2g}"
-        final = unique_path(out_dir / f"{stem}_{time.strftime('%Y%m%d_%H%M%S')}_{params}_AI Clone.wav")
+        final = unique_path(out_dir / f"{stem}_{time.strftime('%Y%m%d_%H%M%S')}.wav")
         sf.write(str(final), wavs[0], sample_rate)
         duration = float(sf.info(str(final)).duration)
 

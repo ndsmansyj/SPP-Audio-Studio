@@ -5,10 +5,13 @@
     RequestedTheme="Light">
     <Application.Resources>
         <ResourceDictionary>
-            <Color x:Key="AccentColor">#6670F6</Color>
+            <Color x:Key="AccentColor">#5E6AD2</Color>
             <SolidColorBrush x:Key="CardBrush" Color="#FFFFFF"/>
-            <SolidColorBrush x:Key="CardBorderBrush" Color="#E1E6EF"/>
-            <SolidColorBrush x:Key="MutedBrush" Color="#697386"/>
+            <SolidColorBrush x:Key="CardBorderBrush" Color="#E7E7EA"/>
+            <SolidColorBrush x:Key="MutedBrush" Color="#6B6B73"/>
+            <SolidColorBrush x:Key="AppBackgroundBrush" Color="#F7F7F8"/>
+            <SolidColorBrush x:Key="SidebarBackgroundBrush" Color="#F3F3F4"/>
+            <SolidColorBrush x:Key="HoverBrush" Color="#F4F4F6"/>
         </ResourceDictionary>
     </Application.Resources>
 </Application>

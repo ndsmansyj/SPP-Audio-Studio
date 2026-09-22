@@ -19,13 +19,13 @@ dotnet build windows/src/SPPAudioStudio.Windows/SPPAudioStudio.Windows.csproj -c
 python -m unittest discover -s windows/tests -v
 ```
 
-应用默认窗口为 1180×960，最小窗口为 1040×840，固定深色主题。未成功连接 Worker 或模型未通过健康检查时，界面必须如实显示未就绪，不使用样例状态冒充真实运行状态。
+应用默认窗口为 1980×1600，最小窗口为 1040×840，使用浅色主题。未成功连接 Worker 或模型未通过健康检查时，界面必须如实显示未就绪，不使用样例状态冒充真实运行状态。
 
 ## Windows Worker
 
-NCM 转换器命令行：`SPP Audio Studio/worker/bin/format_converter.exe input.ncm --out output-dir`。它读取 NCM 的 AES/RC4 加密段，保留原始 MP3/FLAC 编码，不改写源文件，并在输出已存在时跳过。
+格式转换由独立的 .NET CLI 负责，处理受支持的本地音频容器并保留原始音频编码；不会改写源文件，输出冲突时由应用侧生成新的文件名。
 
-要求 Windows 11 x64、Python 3.11/3.12、`curl.exe` 与 FFmpeg。可通过 `SPP_PYTHON_CORE` 指定 App 自带 Python，通过 `SPP_FORMAT_BIN` 指定转换器。状态保存在 `%LOCALAPPDATA%\SPP Audio Studio\` 下，包括 `Models`、`Voices`、`Runtime`、`Cache`、设置及历史记录。
+发布版面向 Windows 10/11 x64，自带 Python Core；目标机器不需要预装 Python。开发模式使用 Python 3.11。可通过 `SPP_PYTHON_CORE` 指定 Python，通过 `SPP_FORMAT_BIN` 指定转换器。状态保存在 `%LOCALAPPDATA%\SPP Audio Studio\` 下，包括 `Models`、`Voices`、`Runtime`、`Cache`、设置及历史记录。
 
 CLI 与 macOS Worker 的主要命令保持一致：
 
@@ -37,17 +37,13 @@ python windows/worker/spp_worker.py model-download qwen|mel|whisper
 python windows/worker/spp_worker.py voice-list
 ```
 
-模型使用 `.part` 文件断点续传，自动模式优先 `hf-mirror.com`，失败后回退 Hugging Face 官方源。Qwen、Whisper 与 Mel 均固定到 `models.json` 中的 40 位 revision；Hugging Face LFS 元数据提供 SHA-256 的大文件会同时校验尺寸和哈希，官方元数据未提供 SHA-256 的普通 Git 文件明确记录为 `null`，只校验尺寸，不伪造哈希。测试不会下载模型。
+模型使用 `.part` 文件断点续传并自动测速选源。Qwen 会在 ModelScope、HF Mirror 与 Hugging Face 官方之间选择；Python 依赖会在清华、USTC、阿里云与 PyPI 官方之间选择；PyTorch CUDA 会在 SJTU 与官方源之间选择并检查目标 Windows wheel 是否存在。Qwen、Whisper 与 Mel 均固定 revision；可获得 SHA-256 的大文件会同时校验尺寸和哈希。测试不会下载模型。
 
 AI 推理为 CUDA-only：Qwen 使用 SDPA + BF16，Whisper 使用 CTranslate2 CUDA FP16，Mel 在入口检查 CUDA；缺少 CUDA 时直接失败，禁止静默回退 CPU。跨进程 `gpu.lock` 串行化 Qwen/ASR 与 Mel 任务，避免 RTX 4080 16GB 上并发争抢显存。运行时固定为 `qwen-tts==0.1.1`、`faster-whisper==1.2.1`、`ctranslate2==4.8.2`、`audio-separator==0.47.0`。PyTorch 与 torchaudio 固定为 `2.11.0+cu126`；该组合已通过 PyTorch 官方 cu126 index 的 `pip index versions` 验证可用。
 
-本机 API 仅绑定 `127.0.0.1`，需要 Bearer Token：
+本机 API 仅绑定 `127.0.0.1` 并要求 Bearer Token。发布包可直接运行根目录的 `SPP Agent API.cmd`；默认 Token 与发现信息写在 `%LOCALAPPDATA%\\SPP Audio Studio\\` 下。
 
-```powershell
-python windows/worker/local_api.py --port 8765 --token <your-secret>
-```
-
-`GET /v1/status` 和 `POST /v1/convert`、`/v1/separate`、`/v1/clone` 均要求 `Authorization: Bearer <token>`。
+核心接口包括 `GET /v1/capabilities`、`GET /v1/status`、`GET /v1/voices`、`POST /v1/tasks` 与 `GET /v1/tasks/{task_id}`。长任务默认串行排队，返回 `task_id` 后可异步查询结果；旧的同步 `/v1/convert`、`/v1/separate`、`/v1/clone` 继续保留兼容。
 
 ## 开发与发布脚本
 

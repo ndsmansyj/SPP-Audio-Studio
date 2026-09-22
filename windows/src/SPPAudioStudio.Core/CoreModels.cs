@@ -55,8 +55,10 @@ public sealed class TaskQueue
 
     public AudioTask Enqueue(string path, ToolMode mode)
     {
-        if (_items.Any(item => string.Equals(item.Path, path, StringComparison.OrdinalIgnoreCase)))
-            throw new InvalidOperationException("文件已在任务列表中");
+        if (_items.Any(item =>
+                string.Equals(item.Path, path, StringComparison.OrdinalIgnoreCase)
+                && item.Status is TaskStatus.Waiting or TaskStatus.Processing))
+            throw new InvalidOperationException("文件已有正在等待或处理中的任务");
         var task = new AudioTask(path, mode);
         _items.Insert(0, task);
         return task;

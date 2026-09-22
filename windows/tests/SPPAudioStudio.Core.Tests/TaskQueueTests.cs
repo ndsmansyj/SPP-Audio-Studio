@@ -18,10 +18,25 @@ public sealed class TaskQueueTests
     }
 
     [TestMethod]
-    public void Queue_rejects_duplicate_file_paths()
+    public void Queue_rejects_duplicate_file_paths_while_task_is_active()
     {
         var queue = new TaskQueue();
         queue.Enqueue("C:/music/demo.wav", ToolMode.Separate);
         Assert.ThrowsException<InvalidOperationException>(() => queue.Enqueue("C:/music/demo.wav", ToolMode.Separate));
+    }
+
+    [TestMethod]
+    public void Queue_allows_same_file_to_run_again_after_completion()
+    {
+        var queue = new TaskQueue();
+        var first = queue.Enqueue("C:/music/demo.wav", ToolMode.Separate);
+        queue.MarkProcessing(first.Id);
+        queue.MarkCompleted(first.Id, "C:/music/out/instrumental.mp3");
+
+        var second = queue.Enqueue("C:/music/demo.wav", ToolMode.Separate);
+
+        Assert.AreNotEqual(first.Id, second.Id);
+        Assert.AreEqual(TaskStatus.Waiting, second.Status);
+        Assert.AreEqual(2, queue.Items.Count);
     }
 }
