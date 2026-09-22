@@ -11,7 +11,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, quote_plus
 
 HOME = Path.home()
 APP_NAME = "SPP Audio Studio"
@@ -30,7 +30,14 @@ MEL_REGISTRY_NAME = "Roformer Model: Mel-Band RoFormer Deux by becruily"
 MEL_CONFIG = "config_deux_becruily.yaml"
 BRIDGE = Path(__file__).with_name("qwen_bridge.py")
 MEL_BRIDGE = Path(__file__).with_name("mel_bridge.py")
-DEFAULT_VOICE_DIR = Path(os.environ.get("SPP_DEFAULT_VOICE_DIR", "")).expanduser()
+_RESOURCE_ROOT = Path(__file__).resolve().parent.parent
+_default_voice_env = os.environ.get("SPP_DEFAULT_VOICE_DIR")
+if _default_voice_env:
+    DEFAULT_VOICE_DIR = Path(_default_voice_env).expanduser()
+else:
+    bundled_default_voice = _RESOURCE_ROOT / "default_voice"
+    source_default_voice = _RESOURCE_ROOT / "assets" / "default_voice"
+    DEFAULT_VOICE_DIR = bundled_default_voice if bundled_default_voice.is_dir() else source_default_voice
 PYTHON_CORE = Path(os.environ.get("SPP_PYTHON_CORE", sys.executable)).expanduser()
 QWEN_RUNTIME_DIR = RUNTIME_DIR / "qwen"
 QWEN_SITE = QWEN_RUNTIME_DIR / "site-packages"
@@ -53,7 +60,7 @@ QWEN_RUNTIME_PACKAGES = [
 ASR_RUNTIME_PACKAGES = ["mlx-whisper==0.4.3", "mlx==0.32.0", "mlx-metal==0.32.0", "torch==2.13.0", "numpy==2.4.6", "imageio-ffmpeg==0.6.0"]
 MEL_RUNTIME_PACKAGE = "audio-separator==0.47.0"
 # Mel-Deux uses the MDXC path. diffq is only required by Demucs in audio-separator,
-# so RC6 installs the needed all-wheel dependencies explicitly and skips diffq.
+# Install the needed all-wheel dependencies explicitly and skip diffq for the Mel path.
 MEL_RUNTIME_DEPS = [
     "beartype>=0.18.5,<0.19.0", "einops>=0.7", "julius>=0.2",
     "librosa>=0.10", "ml_collections", "numpy>=2", "onnx-weekly",
@@ -74,6 +81,7 @@ WHISPER_REPO = "mlx-community/whisper-large-v3-turbo"
 WHISPER_REVISION = "main"
 HF_OFFICIAL = "https://huggingface.co"
 HF_MIRROR = "https://hf-mirror.com"
+MODELSCOPE_ENDPOINT = "https://modelscope.cn"
 
 QWEN_FILES = {
     "config.json": 5522,
@@ -149,6 +157,38 @@ def locate_ffmpeg() -> Path | None:
             if p.is_file() and os.access(p, os.X_OK):
                 return p
     return None
+
+
+def prepare_separator_input(src: Path, tmp: Path) -> Path:
+    if src.suffix.lower() not in {".m4a", ".aac"}:
+        return src
+
+    wav = tmp / "separator-input.wav"
+    errors: list[str] = []
+
+    ffmpeg = locate_ffmpeg()
+    if ffmpeg:
+        proc = run_capture([
+            str(ffmpeg), "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(src), "-vn", "-c:a", "pcm_s16le", str(wav),
+        ])
+        if proc.returncode == 0 and wav.is_file() and wav.stat().st_size > 44:
+            return wav
+        errors.append((proc.stderr or proc.stdout or "ffmpeg failed").strip()[-600:])
+
+    afconvert = Path("/usr/bin/afconvert")
+    if afconvert.is_file():
+        wav.unlink(missing_ok=True)
+        proc = run_capture([
+            str(afconvert), str(src), str(wav),
+            "-f", "WAVE", "-d", "LEI16",
+        ])
+        if proc.returncode == 0 and wav.is_file() and wav.stat().st_size > 44:
+            return wav
+        errors.append((proc.stderr or proc.stdout or "afconvert failed").strip()[-600:])
+
+    detail = " | ".join(x for x in errors if x)
+    raise RuntimeError("M4A/AAC 解码失败" + (f"：{detail}" if detail else ""))
 
 
 def cmd_doctor(_: argparse.Namespace) -> int:
@@ -237,24 +277,25 @@ def cmd_separate(args: argparse.Namespace) -> int:
     fmt = args.format.upper()
     ext = "." + fmt.lower().replace("mp3", "mp3")
 
-    base_args = [
-        "-m", MEL_MODEL,
-        "--model_file_dir", str(mel_model_dir),
-        "--output_dir", str(tmp), "--output_format", fmt,
-    ]
-    if fmt == "MP3":
-        base_args += ["--output_bitrate", args.bitrate]
-    base_args.append(str(src))
-
-    mel_env = {}
-    if env["separator_source"] == "linked":
-        cmd = [str(env["separator_bin"])] + base_args
-    else:
-        cmd = [str(PYTHON_CORE), str(MEL_BRIDGE)] + base_args
-        mel_env["PYTHONPATH"] = str(env["mel_site"])
-        mel_env["PYTHONNOUSERSITE"] = "1"
-
     try:
+        mel_input = prepare_separator_input(src, tmp)
+        base_args = [
+            "-m", MEL_MODEL,
+            "--model_file_dir", str(mel_model_dir),
+            "--output_dir", str(tmp), "--output_format", fmt,
+        ]
+        if fmt == "MP3":
+            base_args += ["--output_bitrate", args.bitrate]
+        base_args.append(str(mel_input))
+
+        mel_env = {}
+        if env["separator_source"] == "linked":
+            cmd = [str(env["separator_bin"])] + base_args
+        else:
+            cmd = [str(PYTHON_CORE), str(MEL_BRIDGE)] + base_args
+            mel_env["PYTHONPATH"] = str(env["mel_site"])
+            mel_env["PYTHONNOUSERSITE"] = "1"
+
         ffmpeg = locate_ffmpeg()
         mel_path = "/usr/bin:/bin:/usr/sbin:/sbin"
         if ffmpeg:
@@ -754,7 +795,24 @@ def _endpoint_order(source: str) -> list[str]:
     return [HF_MIRROR, HF_OFFICIAL]
 
 
-def _download_one(repo: str, revision: str, relpath: str, expected_size: int, target: Path, source: str) -> None:
+def _model_download_url(endpoint: str, repo: str, revision: str, relpath: str) -> str:
+    if endpoint == MODELSCOPE_ENDPOINT:
+        return (
+            f"{endpoint}/api/v1/models/{repo}/repo"
+            f"?Revision=master&FilePath={quote_plus(relpath)}"
+        )
+    return f"{endpoint}/{repo}/resolve/{revision}/{quote(relpath, safe='/')}"
+
+
+def _download_one(
+    repo: str,
+    revision: str,
+    relpath: str,
+    expected_size: int,
+    target: Path,
+    source: str,
+    endpoint_order: list[str] | None = None,
+) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.is_file() and target.stat().st_size == expected_size:
         print(json.dumps({
@@ -764,8 +822,8 @@ def _download_one(repo: str, revision: str, relpath: str, expected_size: int, ta
 
     part = target.with_suffix(target.suffix + ".part")
     errors = []
-    for endpoint in _endpoint_order(source):
-        url = f"{endpoint}/{repo}/resolve/{revision}/{quote(relpath, safe='/')}"
+    for endpoint in (endpoint_order or _endpoint_order(source)):
+        url = _model_download_url(endpoint, repo, revision, relpath)
         print(json.dumps({
             "event": "download_start", "file": relpath,
             "endpoint": endpoint, "expected_bytes": expected_size
@@ -791,9 +849,12 @@ def cmd_model_download(args: argparse.Namespace) -> int:
     ensure_dirs()
     settings = load_settings()
     source = args.source or settings.get("download_source", "auto")
+    endpoint_order: list[str] | None = None
     if args.model == "qwen":
         repo, revision, files = QWEN_REPO, QWEN_REVISION, QWEN_FILES
         target_dir = MODEL_DIR / "Qwen3-TTS-12Hz-1.7B-Base-8bit"
+        source = "modelscope"
+        endpoint_order = [MODELSCOPE_ENDPOINT]
     elif args.model == "whisper":
         repo, revision, files = WHISPER_REPO, WHISPER_REVISION, WHISPER_FILES
         target_dir = MODEL_DIR / "whisper-turbo"
@@ -808,7 +869,10 @@ def cmd_model_download(args: argparse.Namespace) -> int:
             "repo": repo, "total_bytes": total, "source": source
         }, ensure_ascii=False), flush=True)
         for relpath, size in files.items():
-            _download_one(repo, revision, relpath, size, target_dir / relpath, source)
+            _download_one(
+                repo, revision, relpath, size, target_dir / relpath, source,
+                endpoint_order=endpoint_order,
+            )
         print(json.dumps({
             "event": "model_done", "model": args.model,
             "path": str(target_dir), "total_bytes": total

@@ -21,7 +21,10 @@ This file tracks public, user-facing changes. Internal RC test notes and handoff
 - Promoted the Apple Silicon build to **1.0.0** for macOS 14+.
 - Aligned format conversion, Mel-Deux separation, and Qwen3-TTS voice cloning around one serial task queue with a consistent right-side task/history panel.
 - Added queued voice-clone jobs, safe deletion for user-created voice templates, protected bundled templates, and simplified clone output filenames.
-- Switched the desktop UI to a native light appearance with semantic macOS card and separator colors.
+- Added robust M4A / AAC preprocessing for Mel-Deux separation while keeping original source audio read-only.
+- Qwen3-TTS model downloads on macOS now use ModelScope directly; other model/runtime sources remain selectable in the app.
+- Switched the desktop UI to a native light appearance with a consistent typography, card, input, hover, and task-panel system.
+- Hardened the opt-in macOS local API by serializing worker execution to avoid concurrent AI jobs competing for local resources.
 - Retains local playback, model/runtime management, diagnostic reporting, and bundled Python Core so normal users do not need Xcode, Homebrew, or a system Python installation.
 
 ### Distribution notes

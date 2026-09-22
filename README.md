@@ -58,6 +58,8 @@ macOS 版面向 Apple Silicon，当前要求 macOS 14+。
 
 普通用户不需要额外安装 Xcode、Command Line Tools、Homebrew 或系统 Python。首次使用 AI 功能时，在「模型与环境」页面完成所需组件安装即可。
 
+macOS 版的 Qwen3-TTS 模型固定从 ModelScope 下载；Mel-Deux、Whisper 与运行环境仍可在应用内选择镜像 / 官方下载源。
+
 如果 macOS 提示“无法验证开发者”，可前往 **系统设置 → 隐私与安全性 → 仍要打开**。
 
 ## 反馈与诊断

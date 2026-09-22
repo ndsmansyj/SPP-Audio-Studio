@@ -24,8 +24,8 @@ enum SidebarItem: String, CaseIterable, Identifiable {
 }
 
 enum ToolMode: String, CaseIterable, Identifiable {
-    case convert = "仅转换"
-    case separate = "仅分离"
+    case convert = "转换"
+    case separate = "分离"
     case convertAndSeparate = "转换 + 分离"
     var id: String { rawValue }
 }
@@ -351,7 +351,7 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
         switch mode {
         case .convert:
             guard url.pathExtension.lowercased() == "ncm" else {
-                throw WorkerError.message("仅转换模式当前用于受支持的特殊格式")
+                throw WorkerError.message("转换模式当前用于受支持的特殊格式")
             }
             let json = try runWorkerSync(["convert", url.path, "--output-dir", targetDir])
             return json["output"] as? String
@@ -476,7 +476,10 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
         let source = downloadSource
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                _ = try self.runWorkerSync(["model-download", kind, "--source", source])
+                let command = kind == "qwen"
+                    ? ["model-download", kind]
+                    : ["model-download", kind, "--source", source]
+                _ = try self.runWorkerSync(command)
                 DispatchQueue.main.async {
                     self.modelBusy = nil
                     self.modelStatusMessage = "模型下载完成"
@@ -552,7 +555,13 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
                 }
                 do {
                     let command = type == "runtime" ? "runtime-install" : "model-download"
-                    _ = try self.runWorkerSync([command, kind, "--source", source])
+                    let arguments: [String]
+                    if type == "model" && kind == "qwen" {
+                        arguments = [command, kind]
+                    } else {
+                        arguments = [command, kind, "--source", source]
+                    }
+                    _ = try self.runWorkerSync(arguments)
                 } catch {
                     let message = self.logger.sanitize(error.localizedDescription)
                     DispatchQueue.main.async {
@@ -864,12 +873,24 @@ struct RootView: View {
 
     var body: some View {
         NavigationSplitView {
-            List(SidebarItem.allCases, selection: $selection) { item in
-                Label(item.rawValue, systemImage: item.icon)
-                    .tag(item)
-                    .padding(.vertical, 5)
+            VStack(spacing: 0) {
+                SidebarBrandView()
+                Divider()
+
+                List(SidebarItem.allCases, selection: $selection) { item in
+                    Label(item.rawValue, systemImage: item.icon)
+                        .tag(item)
+                        .font(.system(size: 14, weight: .medium))
+                        .padding(.vertical, 6)
+                }
+                .listStyle(.sidebar)
+                .scrollContentBackground(.hidden)
+                .layoutPriority(1)
+
+                SidebarFooterView()
             }
-            .navigationSplitViewColumnWidth(min: 190, ideal: 215)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .navigationSplitViewColumnWidth(min: 200, ideal: 212)
         } detail: {
             Group {
                 switch selection ?? .workbench {
@@ -880,8 +901,189 @@ struct RootView: View {
                 case .environment: EnvironmentView()
                 }
             }
-            .padding(26)
+            .font(AppUI.body)
+            .controlSize(.large)
+            .padding(.horizontal, 28)
+            .padding(.bottom, 24)
+            .padding(.top, 48)
         }
+    }
+}
+
+struct SidebarBrandView: View {
+    private var appIcon: NSImage? {
+        guard let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns") else { return nil }
+        return NSImage(contentsOf: url)
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Group {
+                if let appIcon {
+                    Image(nsImage: appIcon)
+                        .resizable()
+                        .interpolation(.none)
+                } else {
+                    Image(systemName: "waveform.badge.plus")
+                        .resizable()
+                        .scaledToFit()
+                        .padding(8)
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+            .scaledToFit()
+            .frame(width: 42, height: 42)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("SPP Audio Studio")
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .lineLimit(1)
+                Text("1.0 · Local AI")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 40)
+        .padding(.bottom, 11)
+    }
+}
+
+struct SidebarFooterView: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SidebarFooterRow(
+                title: "首次使用",
+                detail: "先到「模型与环境」完成模型与运行环境检查。"
+            )
+            Divider()
+            SidebarFooterRow(
+                title: "免责声明",
+                detail: "仅处理你有权使用的音频与声音。"
+            )
+        }
+        .padding(10)
+        .marginCard()
+        .padding(.horizontal, 10)
+        .padding(.bottom, 10)
+    }
+}
+
+struct SidebarFooterRow: View {
+    let title: String
+    let detail: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.system(size: 11.5, weight: .semibold))
+            Text(detail)
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+                .lineSpacing(1)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+enum AppUI {
+    static let pageTitle = Font.system(size: 32, weight: .bold)
+    static let sectionTitle = Font.system(size: 15, weight: .semibold)
+    static let body = Font.system(size: 14)
+    static let label = Font.system(size: 13, weight: .semibold)
+    static let caption = Font.system(size: 12)
+    static let radius: CGFloat = 12
+    static let formLabelWidth: CGFloat = 96
+    static let formControlWidth: CGFloat = 520
+    static let formCardWidth: CGFloat = 670
+}
+
+private struct AppCardModifier: ViewModifier {
+    let interactive: Bool
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .background(
+                hovering && interactive
+                    ? Color.primary.opacity(0.035)
+                    : Color(nsColor: .controlBackgroundColor),
+                in: RoundedRectangle(cornerRadius: AppUI.radius)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: AppUI.radius)
+                    .strokeBorder(
+                        hovering && interactive
+                            ? Color.accentColor.opacity(0.28)
+                            : Color(nsColor: .separatorColor)
+                    )
+            )
+            .shadow(
+                color: .black.opacity(hovering && interactive ? 0.075 : 0.035),
+                radius: hovering && interactive ? 9 : 5,
+                x: 0,
+                y: 2
+            )
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
+private struct AppInputModifier: ViewModifier {
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(
+                        hovering ? Color.accentColor.opacity(0.42) : Color(nsColor: .separatorColor),
+                        lineWidth: hovering ? 1.2 : 1
+                    )
+            )
+            .shadow(color: .black.opacity(hovering ? 0.055 : 0.025), radius: 4, x: 0, y: 1)
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
+private extension View {
+    func appCard(interactive: Bool = false) -> some View {
+        modifier(AppCardModifier(interactive: interactive))
+    }
+
+    func appInputSurface() -> some View {
+        modifier(AppInputModifier())
+    }
+
+    func marginCard() -> some View {
+        appCard()
+    }
+}
+
+struct FormRow<Content: View>: View {
+    let title: String
+    let content: Content
+
+    init(_ title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 14) {
+            Text(title)
+                .font(AppUI.label)
+                .frame(width: AppUI.formLabelWidth, alignment: .trailing)
+
+            content
+                .frame(width: AppUI.formControlWidth, alignment: .leading)
+        }
+        .frame(width: AppUI.formLabelWidth + 14 + AppUI.formControlWidth, alignment: .leading)
     }
 }
 
@@ -926,24 +1128,31 @@ struct OutputDestinationControls: View {
     let primaryLabel: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("导出位置").font(.headline)
-            Picker("导出位置", selection: $mode) {
-                Text(primaryLabel).tag(primaryValue)
-                Text("自定义目录").tag("custom")
+        VStack(alignment: .leading, spacing: 10) {
+            FormRow("导出位置") {
+                Picker("", selection: $mode) {
+                    Text(primaryLabel).tag(primaryValue)
+                    Text("自定义目录").tag("custom")
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .controlSize(.large)
+                .frame(maxWidth: .infinity)
             }
-            .pickerStyle(.segmented)
-            .frame(maxWidth: 430)
 
             if mode == "custom" {
-                HStack {
-                    Text(directory.isEmpty ? "还没选择目录" : directory)
-                        .font(.caption)
-                        .foregroundStyle(directory.isEmpty ? .secondary : .primary)
-                        .lineLimit(1)
-                        .textSelection(.enabled)
-                    Spacer()
-                    Button("选择目录…") { chooseDirectory() }
+                FormRow("") {
+                    HStack(spacing: 10) {
+                        Text(directory.isEmpty ? "还没选择目录" : directory)
+                            .font(AppUI.caption)
+                            .foregroundStyle(directory.isEmpty ? .secondary : .primary)
+                            .lineLimit(1)
+                            .textSelection(.enabled)
+                        Spacer()
+                        Button("选择目录…") { chooseDirectory() }
+                            .controlSize(.large)
+                    }
+                    .frame(maxWidth: 520)
                 }
             }
         }
@@ -967,6 +1176,7 @@ struct WorkbenchView: View {
     @State private var files: [URL] = []
     @State private var mode: ToolMode = .convertAndSeparate
     @State private var isTargeted = false
+    @State private var isDropHovering = false
     @AppStorage("workbench.outputMode") private var outputMode = "beside"
     @AppStorage("workbench.outputDir") private var outputDir = ""
     @AppStorage("workbench.keep") private var keep = "instrumental"
@@ -982,9 +1192,9 @@ struct WorkbenchView: View {
                         .foregroundStyle(Color.accentColor)
                     VStack(alignment: .leading, spacing: 4) {
                         Text("首次使用：安装模型和运行环境")
-                            .font(.headline)
+                            .font(AppUI.sectionTitle)
                         Text("声音克隆需要 Qwen；人声分离需要 Mel。请到「模型与环境」完成对应安装。")
-                            .font(.subheadline)
+                            .font(AppUI.body)
                             .foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 8)
@@ -994,33 +1204,46 @@ struct WorkbenchView: View {
                 .padding(16)
                 .background(Color.accentColor.opacity(0.09), in: RoundedRectangle(cornerRadius: 14))
             }
-            Picker("模式", selection: $mode) {
-                ForEach(ToolMode.allCases) { Text($0.rawValue).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .frame(maxWidth: 520)
-
-            if mode != .convert {
-                Picker("分离输出", selection: $keep) {
-                    Text("仅伴奏（去人声）").tag("instrumental")
-                    Text("仅人声").tag("vocals")
-                    Text("人声 + 伴奏").tag("both")
+            VStack(alignment: .leading, spacing: 14) {
+                FormRow("模式") {
+                    Picker("", selection: $mode) {
+                        ForEach(ToolMode.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .controlSize(.large)
+                    .frame(maxWidth: .infinity)
                 }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 520)
-            }
 
-            OutputDestinationControls(
-                mode: $outputMode,
-                directory: $outputDir,
-                primaryValue: "beside",
-                primaryLabel: "源文件旁边"
-            )
+                if mode != .convert {
+                    FormRow("分离输出") {
+                        Picker("", selection: $keep) {
+                            Text("仅伴奏（去人声）").tag("instrumental")
+                            Text("仅人声").tag("vocals")
+                            Text("人声 + 伴奏").tag("both")
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .controlSize(.large)
+                        .frame(maxWidth: .infinity)
+                    }
+                }
+
+                OutputDestinationControls(
+                    mode: $outputMode,
+                    directory: $outputDir,
+                    primaryValue: "beside",
+                    primaryLabel: "源文件旁边"
+                )
+            }
+            .padding(18)
+            .frame(width: AppUI.formCardWidth, alignment: .leading)
+            .appCard()
 
             dropZone
             HStack {
                 Button("选择文件…") { chooseFiles() }
-                Button("开始处理") {
+                Button("生成") {
                     state.process(
                         files,
                         mode: mode,
@@ -1039,7 +1262,7 @@ struct WorkbenchView: View {
             }
             if !files.isEmpty {
                 VStack(alignment: .leading, spacing: 7) {
-                    Text("待处理").font(.headline)
+                    Text("待处理").font(AppUI.sectionTitle)
                     ForEach(files, id: \.path) { url in
                         HStack {
                             Image(systemName: url.pathExtension.lowercased() == "ncm" ? "music.note.list" : "waveform")
@@ -1054,7 +1277,8 @@ struct WorkbenchView: View {
 
                 Spacer(minLength: 0)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .frame(maxWidth: 820, alignment: .leading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
 
             TaskSidebarView(modes: Set([
                 ToolMode.convert.rawValue,
@@ -1068,26 +1292,37 @@ struct WorkbenchView: View {
         Label(state.doctorOK ? "本地引擎就绪" : "环境需检查",
               systemImage: state.doctorOK ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
             .foregroundStyle(state.doctorOK ? .green : .orange)
-            .font(.subheadline)
+            .font(AppUI.body)
     }
 
     private var dropZone: some View {
         RoundedRectangle(cornerRadius: 18)
-            .fill(isTargeted ? Color.accentColor.opacity(0.12) : Color(nsColor: .controlBackgroundColor))
+            .fill(
+                isTargeted
+                    ? Color.accentColor.opacity(0.12)
+                    : (isDropHovering ? Color.primary.opacity(0.025) : Color(nsColor: .controlBackgroundColor))
+            )
             .overlay(
                 RoundedRectangle(cornerRadius: 18)
-                    .strokeBorder(isTargeted ? Color.accentColor : Color(nsColor: .separatorColor),
-                                  style: StrokeStyle(lineWidth: 1.2, dash: [8, 7]))
+                    .strokeBorder(
+                        isTargeted
+                            ? Color.accentColor
+                            : (isDropHovering ? Color.accentColor.opacity(0.30) : Color(nsColor: .separatorColor)),
+                        style: StrokeStyle(lineWidth: 1.2, dash: [8, 7])
+                    )
             )
+            .shadow(color: .black.opacity(isDropHovering ? 0.05 : 0.025), radius: 6, x: 0, y: 2)
             .overlay(
                 VStack(spacing: 9) {
                     Image(systemName: "plus.circle").font(.system(size: 32, weight: .light))
-                    Text("把特殊格式 / FLAC / MP3 / WAV / M4A 拖到这里").font(.headline)
+                    Text("把特殊格式 / FLAC / MP3 / WAV / M4A 拖到这里").font(AppUI.sectionTitle)
                     Text(mode == .convertAndSeparate ? "特殊格式会自动先转换，再进入 Mel-Deux；普通音频直接分离。" : "支持批量加入任务队列")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(AppUI.caption).foregroundStyle(.secondary)
                 }
             )
             .frame(height: 180)
+            .onHover { isDropHovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: isDropHovering)
             .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isTargeted) { providers in
                 for provider in providers {
                     provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
@@ -1120,6 +1355,7 @@ struct FileToolView: View {
 
     @State private var files: [URL] = []
     @State private var isTargeted = false
+    @State private var isDropHovering = false
 
     @AppStorage("convert.outputMode") private var convertOutputMode = "beside"
     @AppStorage("convert.outputDir") private var convertOutputDir = ""
@@ -1132,47 +1368,65 @@ struct FileToolView: View {
             VStack(alignment: .leading, spacing: 20) {
                 HeaderBlock(title: title, subtitle: subtitle)
 
-            if mode == .separate {
-                Picker("保留内容", selection: $separateKeep) {
-                    Text("仅伴奏（去人声）").tag("instrumental")
-                    Text("仅人声").tag("vocals")
-                    Text("人声 + 伴奏").tag("both")
+            VStack(alignment: .leading, spacing: 14) {
+                if mode == .separate {
+                    FormRow("保留内容") {
+                        Picker("", selection: $separateKeep) {
+                            Text("仅伴奏（去人声）").tag("instrumental")
+                            Text("仅人声").tag("vocals")
+                            Text("人声 + 伴奏").tag("both")
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .controlSize(.large)
+                        .frame(maxWidth: .infinity)
+                    }
                 }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 520)
-            }
 
-            OutputDestinationControls(
-                mode: outputModeBinding,
-                directory: outputDirBinding,
-                primaryValue: "beside",
-                primaryLabel: "源文件旁边"
-            )
+                OutputDestinationControls(
+                    mode: outputModeBinding,
+                    directory: outputDirBinding,
+                    primaryValue: "beside",
+                    primaryLabel: "源文件旁边"
+                )
+            }
+            .padding(18)
+            .frame(width: AppUI.formCardWidth, alignment: .leading)
+            .appCard()
 
             RoundedRectangle(cornerRadius: 18)
-                .fill(isTargeted ? Color.accentColor.opacity(0.12) : Color(nsColor: .controlBackgroundColor))
+                .fill(
+                    isTargeted
+                        ? Color.accentColor.opacity(0.12)
+                        : (isDropHovering ? Color.primary.opacity(0.025) : Color(nsColor: .controlBackgroundColor))
+                )
                 .overlay(
                     RoundedRectangle(cornerRadius: 18)
                         .strokeBorder(
-                            isTargeted ? Color.accentColor : Color(nsColor: .separatorColor),
+                            isTargeted
+                                ? Color.accentColor
+                                : (isDropHovering ? Color.accentColor.opacity(0.30) : Color(nsColor: .separatorColor)),
                             style: StrokeStyle(lineWidth: 1.2, dash: [8, 7])
                         )
                 )
+                .shadow(color: .black.opacity(isDropHovering ? 0.05 : 0.025), radius: 6, x: 0, y: 2)
                 .overlay(
                     VStack(spacing: 10) {
                         Image(systemName: mode == .convert ? "arrow.triangle.2.circlepath" : "waveform.path.ecg")
                             .font(.system(size: 34, weight: .light))
                         Text(files.isEmpty ? "把文件拖到这里" : "已选择 \(files.count) 个文件")
-                            .font(.headline)
+                            .font(AppUI.sectionTitle)
                         Text(mode == .convert
                              ? "支持批量特殊格式文件"
                              : "支持 MP3 / FLAC / WAV / M4A 等音频")
-                            .font(.caption)
+                            .font(AppUI.caption)
                             .foregroundStyle(.secondary)
                         Button("选择文件…") { chooseFiles() }
                     }
                 )
                 .frame(height: 190)
+                .onHover { isDropHovering = $0 }
+                .animation(.easeOut(duration: 0.12), value: isDropHovering)
                 .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isTargeted) { providers in
                     handleDrop(providers)
                 }
@@ -1196,7 +1450,7 @@ struct FileToolView: View {
             }
 
             HStack {
-                Button(mode.rawValue) {
+                Button("生成") {
                     state.process(
                         files,
                         mode: mode,
@@ -1216,7 +1470,8 @@ struct FileToolView: View {
 
                 Spacer()
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .frame(maxWidth: 820, alignment: .leading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
 
             TaskSidebarView(modes: Set([mode.rawValue]))
         }
@@ -1300,16 +1555,16 @@ struct TaskListView: View {
                         Image(systemName: icon(for: task.status))
                             .foregroundStyle(color(for: task.status))
                         Text(task.title)
-                            .font(.subheadline.weight(.medium))
+                            .font(.system(size: 13.5, weight: .semibold))
                             .lineLimit(1)
                         Spacer()
                         Text(task.status)
-                            .font(.caption)
+                            .font(AppUI.caption)
                             .foregroundStyle(.secondary)
                     }
 
                     Text(task.detail.isEmpty ? task.mode : task.detail)
-                        .font(.caption)
+                        .font(AppUI.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
 
@@ -1402,28 +1657,27 @@ struct TaskSidebarView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("任务队列").font(.headline)
+                Text("任务队列").font(AppUI.sectionTitle)
                 Spacer()
                 Text(summary)
-                    .font(.caption)
+                    .font(AppUI.caption)
                     .foregroundStyle(.secondary)
             }
             Divider()
             TaskListView(modes: modes)
             if !state.previewStatus.isEmpty {
                 Text(state.previewStatus)
-                    .font(.caption)
+                    .font(AppUI.caption)
                     .foregroundStyle(.secondary)
             }
         }
-        .padding(14)
-        .frame(width: 340, alignment: .topLeading)
+        .padding(.leading, 16)
+        .padding(.trailing, 8)
+        .frame(width: 280, alignment: .topLeading)
         .frame(maxHeight: .infinity, alignment: .topLeading)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .strokeBorder(Color(nsColor: .separatorColor))
-        )
+        .overlay(alignment: .leading) {
+            Divider()
+        }
     }
 }
 
@@ -1432,9 +1686,13 @@ struct HeaderBlock: View {
     let subtitle: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(title).font(.system(size: 28, weight: .bold))
-            Text(subtitle).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 7) {
+            Text(title)
+                .font(AppUI.pageTitle)
+                .tracking(-0.4)
+            Text(subtitle)
+                .font(AppUI.body)
+                .foregroundStyle(.secondary)
         }
     }
 }
@@ -1446,19 +1704,22 @@ struct VoiceCloneView: View {
     @State private var text = "大家好，我是宋盼盼。这是一段 SPP Audio Studio 的声音克隆测试。如果你能自然地听到这句话，说明人声模板、模型和本地推理都已经正常工作。"
     @State private var showAdd = false
     @State private var pendingDeleteVoice: VoiceTemplate?
+    @State private var hoveredVoiceID: String?
+    @State private var temporaryRefHovered = false
     @AppStorage("clone.outputMode") private var outputMode = "default"
     @AppStorage("clone.outputDir") private var outputDir = ""
 
     var body: some View {
         HStack(alignment: .top, spacing: 20) {
-            VStack(alignment: .leading, spacing: 18) {
-                HStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    HStack {
                     HeaderBlock(title: "声音克隆", subtitle: "常用人声保存一次，以后选模板、粘文案、直接生成。")
                 Spacer()
                 Button("＋ 新建人声模板") { showAdd = true }
             }
 
-            Text("常用人声").font(.headline)
+            Text("常用人声").font(AppUI.sectionTitle)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 12) {
                     ForEach(state.voices) { voice in
@@ -1469,78 +1730,102 @@ struct VoiceCloneView: View {
                     } label: {
                         VStack(alignment: .leading, spacing: 8) {
                             Image(systemName: "plus.circle").font(.title2)
-                            Text("临时参考音").font(.headline)
+                            Text("临时参考音").font(AppUI.sectionTitle)
                             Text(temporaryRef?.lastPathComponent ?? "偶尔用的声音，不保存模板")
-                                .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                .font(AppUI.caption).foregroundStyle(.secondary).lineLimit(2)
                         }
-                        .frame(width: 170, height: 95, alignment: .leading)
-                        .padding(14)
-                        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 15))
-                        .overlay(RoundedRectangle(cornerRadius: 15).strokeBorder(Color(nsColor: .separatorColor)))
+                        .frame(width: 180, height: 102, alignment: .leading)
+                        .padding(15)
+                        .background(
+                            temporaryRefHovered ? Color.primary.opacity(0.035) : Color(nsColor: .controlBackgroundColor),
+                            in: RoundedRectangle(cornerRadius: 14)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14)
+                                .strokeBorder(
+                                    temporaryRefHovered ? Color.accentColor.opacity(0.30) : Color(nsColor: .separatorColor)
+                                )
+                        )
+                        .shadow(color: .black.opacity(temporaryRefHovered ? 0.07 : 0.035), radius: temporaryRefHovered ? 9 : 5, x: 0, y: 2)
                     }
                     .buttonStyle(.plain)
+                    .onHover { temporaryRefHovered = $0 }
+                    .animation(.easeOut(duration: 0.12), value: temporaryRefHovered)
                 }
             }
 
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: 6) {
                 Label("参考音建议", systemImage: "waveform")
-                    .font(.headline)
+                    .font(AppUI.sectionTitle)
+                    .foregroundStyle(.primary)
                 Text("推荐 5–15 秒、单人清晰说话、少背景音乐和回声。支持 WAV、M4A、MP3，也可选 FLAC、AAC、AIFF 或 CAF。")
                 Text("参考音里的原话要与音频一致；安装 Whisper 后可以留空自动转写。")
             }
-            .font(.subheadline)
+            .font(AppUI.body)
             .foregroundStyle(.secondary)
-            .padding(14)
+            .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+            .appCard(interactive: true)
 
             if temporaryRef != nil {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("临时参考音的原话").font(.headline)
+                    Text("临时参考音的原话").font(AppUI.sectionTitle)
                     TextField("输入参考音频里说的话", text: $temporaryRefText, axis: .vertical)
                         .lineLimit(2...4)
-                        .textFieldStyle(.roundedBorder)
+                        .textFieldStyle(.plain)
+                        .font(AppUI.body)
+                        .padding(10)
+                        .appInputSurface()
                     Text("未配置 Whisper 时需填写。这里填写参考音说的话，不是要生成的文案。")
-                        .font(.caption)
+                        .font(AppUI.caption)
                         .foregroundStyle(.secondary)
                 }
             }
 
-            Text("生成文案").font(.headline)
+            Text("生成文案").font(AppUI.sectionTitle)
             Text("克隆结果偶尔会有波动，可以多生成两版挑选；文案较长时建议分成两段生成。")
-                .font(.caption)
+                .font(AppUI.caption)
                 .foregroundStyle(.secondary)
             TextEditor(text: $text)
-                .font(.system(size: 16))
+                .font(.system(size: 15))
                 .scrollContentBackground(.hidden)
-                .padding(10)
-                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
-                .frame(minHeight: 180)
+                .padding(12)
+                .appInputSurface()
+                .frame(minHeight: 200)
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("导出位置").font(.headline)
-                Picker("导出位置", selection: $outputMode) {
-                    Text("App 默认目录").tag("default")
-                    if temporaryRef != nil {
-                        Text("参考音频旁边").tag("reference")
+            VStack(alignment: .leading, spacing: 12) {
+                FormRow("导出位置") {
+                    Picker("", selection: $outputMode) {
+                        Text("App 默认目录").tag("default")
+                        if temporaryRef != nil {
+                            Text("参考音频旁边").tag("reference")
+                        }
+                        Text("自定义目录").tag("custom")
                     }
-                    Text("自定义目录").tag("custom")
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .controlSize(.large)
+                    .frame(maxWidth: .infinity)
                 }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: temporaryRef == nil ? 430 : 620)
 
                 if outputMode == "custom" {
-                    HStack {
-                        Text(outputDir.isEmpty ? "还没选择目录" : outputDir)
-                            .font(.caption)
-                            .foregroundStyle(outputDir.isEmpty ? .secondary : .primary)
-                            .lineLimit(1)
-                            .textSelection(.enabled)
-                        Spacer()
-                        Button("选择目录…") { chooseOutputDirectory() }
+                    FormRow("") {
+                        HStack(spacing: 10) {
+                            Text(outputDir.isEmpty ? "还没选择目录" : outputDir)
+                                .font(AppUI.caption)
+                                .foregroundStyle(outputDir.isEmpty ? .secondary : .primary)
+                                .lineLimit(1)
+                                .textSelection(.enabled)
+                            Spacer()
+                            Button("选择目录…") { chooseOutputDirectory() }
+                                .controlSize(.large)
+                        }
+                        .frame(maxWidth: 520)
                     }
                 }
             }
+            .padding(16)
+            .appCard()
 
             HStack(spacing: 12) {
                 Button {
@@ -1553,7 +1838,7 @@ struct VoiceCloneView: View {
                         outputDir: effectiveCloneOutputDir
                     )
                 } label: {
-                    Label("生成声音", systemImage: "waveform.badge.plus")
+                    Label("生成", systemImage: "waveform.badge.plus")
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(outputMode == "custom" && outputDir.isEmpty)
@@ -1571,7 +1856,7 @@ struct VoiceCloneView: View {
                     }
                     Button("在 Finder 中显示") { state.reveal(output) }
                 }
-                Text(state.voiceStatus).font(.caption).foregroundStyle(.secondary)
+                Text(state.voiceStatus).font(AppUI.caption).foregroundStyle(.secondary)
                 Spacer()
             }
 
@@ -1579,13 +1864,13 @@ struct VoiceCloneView: View {
                 Divider()
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("当前模板：\(selected.name)").font(.headline)
+                        Text("当前模板：\(selected.name)").font(AppUI.sectionTitle)
                         if !selected.referenceText.isEmpty {
                             Text("参考文本：\(selected.referenceText)")
-                                .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                .font(AppUI.caption).foregroundStyle(.secondary).lineLimit(2)
                         }
                         if !selected.note.isEmpty {
-                            Text(selected.note).font(.caption).foregroundStyle(.secondary)
+                            Text(selected.note).font(AppUI.caption).foregroundStyle(.secondary)
                         }
                     }
                     Spacer()
@@ -1600,10 +1885,13 @@ struct VoiceCloneView: View {
                         Label("默认", systemImage: "pin.fill").foregroundStyle(.secondary)
                     }
                 }
+                }
             }
-                Spacer()
+            .frame(maxWidth: 860, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .top)
+            .padding(.trailing, 6)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
 
             TaskSidebarView(modes: Set(["声音克隆"]))
         }
@@ -1693,23 +1981,41 @@ struct VoiceCloneView: View {
                         .overlay(Text(String(voice.name.prefix(1))).fontWeight(.bold))
                     Spacer()
                     if voice.isDefault {
-                        Image(systemName: "pin.fill").font(.caption).foregroundStyle(.secondary)
+                        Image(systemName: "pin.fill").font(AppUI.caption).foregroundStyle(.secondary)
                     }
                 }
-                Text(voice.name).font(.headline).lineLimit(1)
+                Text(voice.name).font(AppUI.sectionTitle).lineLimit(1)
                 Text(voice.note.isEmpty ? "Qwen TTS 人声模板" : voice.note)
-                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    .font(AppUI.caption).foregroundStyle(.secondary).lineLimit(1)
             }
-            .frame(width: 170, height: 95, alignment: .leading)
-            .padding(14)
-            .background(active ? Color.accentColor.opacity(0.16) : Color(nsColor: .controlBackgroundColor),
-                        in: RoundedRectangle(cornerRadius: 15))
+            .frame(width: 180, height: 102, alignment: .leading)
+            .padding(15)
+            .background(
+                active
+                    ? Color.accentColor.opacity(0.13)
+                    : (hoveredVoiceID == voice.id ? Color.primary.opacity(0.035) : Color(nsColor: .controlBackgroundColor)),
+                in: RoundedRectangle(cornerRadius: 14)
+            )
             .overlay(
-                RoundedRectangle(cornerRadius: 15)
-                    .strokeBorder(active ? Color.accentColor : Color(nsColor: .separatorColor))
+                RoundedRectangle(cornerRadius: 14)
+                    .strokeBorder(
+                        active
+                            ? Color.accentColor.opacity(0.75)
+                            : (hoveredVoiceID == voice.id ? Color.accentColor.opacity(0.30) : Color(nsColor: .separatorColor))
+                    )
+            )
+            .shadow(
+                color: .black.opacity(hoveredVoiceID == voice.id ? 0.07 : 0.035),
+                radius: hoveredVoiceID == voice.id ? 9 : 5,
+                x: 0,
+                y: 2
             )
         }
         .buttonStyle(.plain)
+        .onHover { hovering in
+            hoveredVoiceID = hovering ? voice.id : nil
+        }
+        .animation(.easeOut(duration: 0.12), value: hoveredVoiceID)
     }
 }
 
@@ -1734,7 +2040,7 @@ struct AddVoiceSheet: View {
             }
             TextField("参考音频里说了什么", text: $refText)
             Text("未配置 Whisper 时需填写参考音频的原话。")
-                .font(.caption)
+                .font(AppUI.caption)
                 .foregroundStyle(.secondary)
             TextField("备注，例如：日常短视频 / 轻松自然", text: $note)
             Toggle("设为默认人声", isOn: $makeDefault)
@@ -1797,11 +2103,11 @@ struct EnvironmentView: View {
 
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 5) {
-                        Text("一键安装全部组件").font(.headline)
+                        Text("一键安装全部组件").font(AppUI.sectionTitle)
                         Text("依次安装 Qwen、Mel 和 Whisper 的模型与运行环境；已安装的项目会跳过。约需 5 GB 模型空间。")
-                            .font(.caption).foregroundStyle(.secondary)
+                            .font(AppUI.caption).foregroundStyle(.secondary)
                         if !state.batchProgress.isEmpty {
-                            Text(state.batchProgress).font(.caption).foregroundStyle(.secondary)
+                            Text(state.batchProgress).font(AppUI.caption).foregroundStyle(.secondary)
                                 .lineLimit(3).textSelection(.enabled)
                         }
                     }
@@ -1825,25 +2131,31 @@ struct EnvironmentView: View {
                     Text(state.doctorOK
                          ? "当前环境全部就绪"
                          : (state.coreReady ? "App 核心已就绪，AI 组件待安装" : "核心组件需要处理"))
-                        .font(.headline)
+                        .font(AppUI.sectionTitle)
                     Spacer()
-                    Picker("下载源", selection: Binding(
-                        get: { state.downloadSource },
-                        set: { state.setDownloadSource($0) }
-                    )) {
-                        Text("自动（镜像优先）").tag("auto")
-                        Text("HF 镜像").tag("mirror")
-                        Text("Hugging Face 官方").tag("official")
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Picker("其他组件下载源", selection: Binding(
+                            get: { state.downloadSource },
+                            set: { state.setDownloadSource($0) }
+                        )) {
+                            Text("自动（镜像优先）").tag("auto")
+                            Text("镜像优先").tag("mirror")
+                            Text("官方优先").tag("official")
+                        }
+                        .pickerStyle(.menu)
+                        .frame(width: 230)
+
+                        Text("Mel / Whisper / 运行环境 · Qwen 固定 ModelScope")
+                            .font(AppUI.caption)
+                            .foregroundStyle(.secondary)
                     }
-                    .pickerStyle(.menu)
-                    .frame(width: 210)
                 }
 
                 HStack(alignment: .top, spacing: 14) {
                     modelCard(
                         kind: "qwen",
                         title: "Qwen3-TTS 1.7B 8bit",
-                        subtitle: "声音克隆 · MLX",
+                        subtitle: "声音克隆 · MLX · ModelScope",
                         size: "约 3.1 GB",
                         license: "Apache-2.0",
                         installed: state.qwenInstalled,
@@ -1877,23 +2189,23 @@ struct EnvironmentView: View {
 
                 if !state.modelStatusMessage.isEmpty {
                     Text(state.modelStatusMessage)
-                        .font(.caption)
+                        .font(AppUI.caption)
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
                 }
 
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Text("诊断与日志").font(.headline)
+                        Text("诊断与日志").font(AppUI.sectionTitle)
                         Spacer()
                         if !state.diagnosticStatus.isEmpty {
                             Text(state.diagnosticStatus)
-                                .font(.caption)
+                                .font(AppUI.caption)
                                 .foregroundStyle(.secondary)
                         }
                     }
                     Text("群测遇到问题时，优先点“复制诊断报告”直接发给开发者。报告默认隐藏用户名、完整路径和声音克隆文案。")
-                        .font(.caption)
+                        .font(AppUI.caption)
                         .foregroundStyle(.secondary)
                     HStack(spacing: 10) {
                         Button("复制诊断报告") { state.copyDiagnosticReport() }
@@ -1904,7 +2216,7 @@ struct EnvironmentView: View {
                     }
                 }
                 .padding(16)
-                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
+                .appCard(interactive: true)
 
                 Divider()
 
@@ -1918,18 +2230,18 @@ struct EnvironmentView: View {
                                 Text(labels[key] ?? key)
                                 Spacer()
                                 Text(ok ? "已就绪" : "缺失")
-                                    .font(.caption)
+                                    .font(AppUI.caption)
                                     .foregroundStyle(.secondary)
                             }
                             .padding(14)
-                            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+                            .appCard(interactive: true)
                         }
                     }
                     .padding(.top, 10)
                 }
 
                 Text("说明：模型下载到 App 自己的 Models 目录；“链接本地”只记录路径，不复制、不移动原模型。下载失败时会按所选策略自动切换镜像 / 官方源。")
-                    .font(.caption)
+                    .font(AppUI.caption)
                     .foregroundStyle(.secondary)
             }
         }
@@ -1949,8 +2261,8 @@ struct EnvironmentView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(title).font(.headline)
-                    Text(subtitle).font(.caption).foregroundStyle(.secondary)
+                    Text(title).font(AppUI.sectionTitle)
+                    Text(subtitle).font(AppUI.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
                 statusPill(installed: installed, source: source)
@@ -1960,7 +2272,7 @@ struct EnvironmentView: View {
                 Label(size, systemImage: "internaldrive")
                 Text(license)
             }
-            .font(.caption)
+            .font(AppUI.caption)
             .foregroundStyle(.secondary)
 
             Text(path.isEmpty ? "尚未配置" : path)
@@ -1989,22 +2301,21 @@ struct EnvironmentView: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color(nsColor: .separatorColor)))
+        .appCard(interactive: true)
     }
 
     private var runtimeCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("推理运行环境").font(.headline)
+                Text("推理运行环境").font(AppUI.sectionTitle)
                 Spacer()
                 Text(runtimeSummary)
-                    .font(.caption)
+                    .font(AppUI.caption)
                     .foregroundStyle((state.qwenRuntimeInstalled && state.separatorInstalled) ? .green : .orange)
             }
 
-            Text("RC6 自带 Python Core，不需要 Xcode Command Line Tools。Qwen / Mel 的推理依赖可以在这里一次安装，安装完成后离线使用。")
-                .font(.caption)
+            Text("App 自带 Python Core，不需要 Xcode Command Line Tools。Qwen / Mel 的推理依赖可以在这里一次安装，安装完成后离线使用。")
+                .font(AppUI.caption)
                 .foregroundStyle(.secondary)
 
             HStack {
@@ -2070,7 +2381,7 @@ struct EnvironmentView: View {
                 .foregroundStyle(.secondary)
         }
         .padding(16)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
+        .appCard(interactive: true)
     }
 
     private var runtimeSummary: String {
