@@ -8,7 +8,7 @@ Windows 独立实现位于本目录，macOS 代码保持不变。
 - `src/SPPAudioStudio.Windows` — WinUI 3 / Windows App SDK 桌面应用。
 - `worker` — Windows 专用 Python Worker、本机 API 与 CUDA 推理桥接。
 - `tests/SPPAudioStudio.Core.Tests` — C# Core 测试。
-- `src/FormatConverter` — 无额外运行时依赖的 .NET 8 NCM 解密/封装 CLI。
+- `src/FormatConverter` — 无额外运行时依赖的 .NET 8 本地音频格式转换 CLI。
 - `tests/test_worker.py` — 不下载模型即可运行的 Worker 测试。
 
 ## 当前开发构建
@@ -99,11 +99,11 @@ The build restores and compiles the WinUI project, byte-compiles the worker, run
 ## Publish a portable release
 
 ```powershell
-.\windows\publish.ps1 -Version 0.3.0 -Platform x64
+.\windows\publish.ps1 -Version 1.0.0 -Platform x64
 ```
 
 ```bash
-./windows/publish.sh -Version 0.3.0 -Platform x64
+./windows/publish.sh -Version 1.0.0 -Platform x64
 ```
 
 The release strategy is **unpackaged, self-contained, portable**:
@@ -119,8 +119,8 @@ This is intentionally not MSIX: portable builds avoid certificate/install requir
 Verify an archive checksum:
 
 ```powershell
-Get-FileHash .\windows\artifacts\packages\SPPAudioStudio-0.3.0-win-x64.zip -Algorithm SHA256
-Get-Content .\windows\artifacts\packages\SPPAudioStudio-0.3.0-win-x64.zip.sha256
+Get-FileHash .\windows\artifacts\packages\SPPAudioStudio-1.0.0-win-x64.zip -Algorithm SHA256
+Get-Content .\windows\artifacts\packages\SPPAudioStudio-1.0.0-win-x64.zip.sha256
 ```
 
 ## Launch

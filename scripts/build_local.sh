@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${VERSION:-0.2.0-rc6}"
-BUILD_NUMBER="${BUILD_NUMBER:-26}"
+VERSION="${VERSION:-1.0.0}"
+BUILD_NUMBER="${BUILD_NUMBER:-108}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BUILD="$ROOT/build/$STAMP"
 APP="$BUILD/SPP Audio Studio.app"
@@ -69,5 +69,10 @@ ln -s /Applications "$DMG_ROOT/Applications"
 DMG="$BUILD/SPP-Audio-Studio-$VERSION.dmg"
 hdiutil create -volname "SPP Audio Studio" -srcfolder "$DMG_ROOT" -format UDZO "$DMG"
 
+codesign --verify --deep --strict "$APP"
+hdiutil verify "$DMG" >/dev/null
+shasum -a 256 "$DMG" > "$DMG.sha256"
+
 echo "$APP"
 echo "$DMG"
+echo "$DMG.sha256"
