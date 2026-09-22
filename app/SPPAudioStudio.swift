@@ -864,36 +864,12 @@ struct RootView: View {
 
     var body: some View {
         NavigationSplitView {
-            VStack(spacing: 0) {
-                SidebarBrandView()
-
-                Divider()
-                    .padding(.horizontal, 14)
-
-                List(SidebarItem.allCases, selection: $selection) { item in
-                    Label(item.rawValue, systemImage: item.icon)
-                        .tag(item)
-                        .font(.system(size: 13.5, weight: .medium))
-                        .padding(.vertical, 5)
-                }
-                .listStyle(.sidebar)
-                .scrollContentBackground(.hidden)
-
-                VStack(spacing: 9) {
-                    SidebarGuideCard(
-                        title: "首次使用",
-                        detail: "先到「模型与环境」完成模型与运行环境检查。首次安装时会显示下载进度。"
-                    )
-                    SidebarGuideCard(
-                        title: "免责声明",
-                        detail: "仅处理你有权使用的音频与声音；第三方模型许可与生成内容合规由使用者自行确认。"
-                    )
-                }
-                .padding(.horizontal, 12)
-                .padding(.bottom, 14)
+            List(SidebarItem.allCases, selection: $selection) { item in
+                Label(item.rawValue, systemImage: item.icon)
+                    .tag(item)
+                    .padding(.vertical, 5)
             }
-            .background(Color(nsColor: .windowBackgroundColor))
-            .navigationSplitViewColumnWidth(min: 215, ideal: 232)
+            .navigationSplitViewColumnWidth(min: 190, ideal: 215)
         } detail: {
             Group {
                 switch selection ?? .workbench {
@@ -904,69 +880,8 @@ struct RootView: View {
                 case .environment: EnvironmentView()
                 }
             }
-            .padding(24)
+            .padding(26)
         }
-    }
-}
-
-struct SidebarBrandView: View {
-    private var appIcon: NSImage? {
-        guard let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns") else { return nil }
-        return NSImage(contentsOf: url)
-    }
-
-    var body: some View {
-        VStack(spacing: 6) {
-            Group {
-                if let appIcon {
-                    Image(nsImage: appIcon)
-                        .resizable()
-                        .interpolation(.none)
-                } else {
-                    Image(systemName: "waveform.badge.plus")
-                        .resizable()
-                        .scaledToFit()
-                        .padding(10)
-                        .foregroundStyle(Color.accentColor)
-                }
-            }
-            .scaledToFit()
-            .frame(width: 58, height: 58)
-
-            Text("SPP Audio Studio")
-                .font(.system(size: 15, weight: .semibold))
-
-            Text("1.0 · Local AI")
-                .font(.system(size: 10.5, weight: .medium))
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 18)
-        .padding(.bottom, 16)
-    }
-}
-
-struct SidebarGuideCard: View {
-    let title: String
-    let detail: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.system(size: 12, weight: .semibold))
-            Text(detail)
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .lineSpacing(2)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(11)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 11))
-        .overlay(
-            RoundedRectangle(cornerRadius: 11)
-                .strokeBorder(Color(nsColor: .separatorColor))
-        )
     }
 }
 
@@ -1057,7 +972,7 @@ struct WorkbenchView: View {
     @AppStorage("workbench.keep") private var keep = "instrumental"
 
     var body: some View {
-        HStack(alignment: .top, spacing: 18) {
+        HStack(alignment: .top, spacing: 20) {
             VStack(alignment: .leading, spacing: 20) {
                 HeaderBlock(title: "音频工作台", subtitle: "转换音乐、人声分离、克隆声音。常用操作尽量一处完成。")
             if !state.qwenInstalled || !state.melInstalled || !state.qwenRuntimeInstalled || !state.separatorInstalled {
@@ -1213,7 +1128,7 @@ struct FileToolView: View {
     @AppStorage("separate.keep") private var separateKeep = "instrumental"
 
     var body: some View {
-        HStack(alignment: .top, spacing: 18) {
+        HStack(alignment: .top, spacing: 20) {
             VStack(alignment: .leading, spacing: 20) {
                 HeaderBlock(title: title, subtitle: subtitle)
 
@@ -1502,7 +1417,7 @@ struct TaskSidebarView: View {
             }
         }
         .padding(14)
-        .frame(width: 300, alignment: .topLeading)
+        .frame(width: 340, alignment: .topLeading)
         .frame(maxHeight: .infinity, alignment: .topLeading)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
         .overlay(
@@ -1535,7 +1450,7 @@ struct VoiceCloneView: View {
     @AppStorage("clone.outputDir") private var outputDir = ""
 
     var body: some View {
-        HStack(alignment: .top, spacing: 18) {
+        HStack(alignment: .top, spacing: 20) {
             VStack(alignment: .leading, spacing: 18) {
                 HStack {
                     HeaderBlock(title: "声音克隆", subtitle: "常用人声保存一次，以后选模板、粘文案、直接生成。")
