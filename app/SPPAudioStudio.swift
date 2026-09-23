@@ -527,7 +527,7 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
     func downloadModel(_ kind: String) {
         guard modelBusy == nil else { return }
         modelBusy = kind
-        modelStatusMessage = kind == "qwen" ? "正在下载 Qwen3-TTS…" : (kind == "whisper" ? "正在下载 Whisper…" : "正在下载 Mel-Deux…")
+        modelStatusMessage = kind == "qwen" ? "正在下载并校验 Qwen3-TTS…" : (kind == "whisper" ? "正在下载并校验 Whisper…" : "正在下载并校验 Mel-Deux…")
         let source = downloadSource
         DispatchQueue.global(qos: .userInitiated).async {
             do {
@@ -537,7 +537,7 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
                 _ = try self.runWorkerSync(command)
                 DispatchQueue.main.async {
                     self.modelBusy = nil
-                    self.modelStatusMessage = "模型下载完成"
+                    self.modelStatusMessage = "模型下载与校验完成"
                 }
                 self.refreshModels()
                 self.refreshDoctor()
@@ -2352,6 +2352,21 @@ struct EnvironmentView: View {
 
                 Button("链接本地…") { chooseModelFolder(kind: kind) }
                     .disabled(state.modelBusy != nil || state.batchBusy)
+            }
+
+            if state.modelBusy == kind {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(state.modelStatusMessage.isEmpty ? "正在下载并校验模型…" : state.modelStatusMessage)
+                        .font(AppUI.caption.weight(.medium))
+                    Spacer()
+                    Text("请保持窗口开启")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 9))
             }
         }
         .padding(16)
