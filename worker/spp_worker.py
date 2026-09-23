@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
+import hashlib
 import json
 import os
 import re
@@ -10,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote, quote_plus
 
@@ -22,6 +25,9 @@ MODEL_DIR = DATA_DIR / "Models"
 RUNTIME_DIR = DATA_DIR / "Runtime"
 HISTORY_FILE = DATA_DIR / "history.jsonl"
 SETTINGS_FILE = DATA_DIR / "settings.json"
+TASK_LOCK_FILE = RUNTIME_DIR / "task.lock"
+
+LAST_EMIT_PAYLOAD: dict | None = None
 
 BUNDLED_FORMAT_BIN = Path(__file__).resolve().parent.parent / "bin" / "format_converter"
 FORMAT_BIN = Path(os.environ.get("SPP_FORMAT_BIN", str(BUNDLED_FORMAT_BIN))).expanduser()
@@ -78,7 +84,7 @@ QWEN_REVISION = "e7dd0585652209fa0d7783659aad4e8a324de11c"
 MEL_REPO = "becruily/mel-band-roformer-deux"
 MEL_REVISION = "2da74427d682a3df47a774378fc24d7a1a0cdaad"
 WHISPER_REPO = "mlx-community/whisper-large-v3-turbo"
-WHISPER_REVISION = "main"
+WHISPER_REVISION = "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb"
 HF_OFFICIAL = "https://huggingface.co"
 HF_MIRROR = "https://hf-mirror.com"
 MODELSCOPE_ENDPOINT = "https://modelscope.cn"
@@ -103,6 +109,29 @@ MEL_FILES = {
 }
 WHISPER_FILES = {"config.json": 268, "weights.safetensors": 1613977612}
 
+QWEN_SHA256 = {
+    "config.json": "b14fba6bfd391968876248b843b095696b0188187a3d774a3bddc32544d15627",
+    "generation_config.json": "f1b90b4513f3b34c62851049e2492d7b4c5940daf1276f89c82b8ef04127f3aa",
+    "merges.txt": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+    "model.safetensors": "b965c581ccf6aa852a4124feeb7a8a111542ee7b213139368b4cc7ba7fd4728b",
+    "model.safetensors.index.json": "9592a7c0ac3261a6211978416ef1796d3841225ac0ff0f9d6bfb5d1a6b49e5e9",
+    "preprocessor_config.json": "efdde1022ea9d76928bf7a9cd53139138f5ba2e466e837f08f6105ab1af1c119",
+    "speech_tokenizer/config.json": "ee65bb901c876664ab8707c487157aa1a6ee57c65969b28fb5ec9dc211e68167",
+    "speech_tokenizer/configuration.json": "6bc26d64eb5024b4d1dab5a52371958b429256d6c9d59787f1f5294a54e0cebd",
+    "speech_tokenizer/model.safetensors": "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258",
+    "speech_tokenizer/preprocessor_config.json": "fcb3805e597e786d4067706e602f6688524640f8d3396790e2e09b5942fcbdfb",
+    "tokenizer_config.json": "dc3c31c3bdaedd5016382bb3cbe07323026775ad51f5a4fb564505992ae4a670",
+    "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+}
+MEL_SHA256 = {
+    "becruily_deux.ckpt": "10255c02295bf3e3865d4ee50ff752d7b19b124ed5fd93b147babc4333eda3aa",
+    "config_deux_becruily.yaml": "bb3ea9bce37ca96d63568490d5a92d7e41df3d7726788b6970c10d89eb62d902",
+}
+WHISPER_SHA256 = {
+    "config.json": "b34fc29e4e11e0a25e812775dd67f4dd16fc2c8eb43d28ae25ff7d660ecb6379",
+    "weights.safetensors": "951ed3fc1203e6a62467abb2144a96ce7eafca8fa77e3704fdb8635ff3e7f8a6",
+}
+
 
 def ensure_dirs() -> None:
     for p in (DATA_DIR, CACHE_DIR, VOICE_DIR, MODEL_DIR, RUNTIME_DIR):
@@ -110,6 +139,8 @@ def ensure_dirs() -> None:
 
 
 def emit(payload: dict, code: int = 0) -> int:
+    global LAST_EMIT_PAYLOAD
+    LAST_EMIT_PAYLOAD = payload
     print(json.dumps(payload, ensure_ascii=False))
     return code
 
@@ -122,7 +153,7 @@ def unique_path(path: Path) -> Path:
         if not candidate.exists():
             return candidate
     raise RuntimeError(f"无法生成不重名输出：{path}")
-def append_history(kind: str, source: str, output: str, status: str = "done") -> None:
+def append_history(kind: str, source: str, output: str, status: str = "done", detail: str = "") -> None:
     ensure_dirs()
     item = {
         "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -130,9 +161,40 @@ def append_history(kind: str, source: str, output: str, status: str = "done") ->
         "source": source,
         "output": output,
         "status": status,
+        "detail": detail,
     }
     with HISTORY_FILE.open("a", encoding="utf-8") as f:
         f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+
+@contextmanager
+def task_lock(timeout: float = 3600):
+    """Serialize user jobs across App/API worker processes on macOS."""
+    ensure_dirs()
+    handle = TASK_LOCK_FILE.open("a+b")
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                handle.close()
+                raise TimeoutError("等待任务锁超时")
+            time.sleep(0.1)
+    try:
+        yield
+    finally:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def run_capture(cmd: list[str], env: dict | None = None) -> subprocess.CompletedProcess:
@@ -202,13 +264,22 @@ def cmd_doctor(_: argparse.Namespace) -> int:
         "bundled_python_core": PYTHON_CORE.is_file() and os.access(PYTHON_CORE, os.X_OK),
         "format_converter_binary": FORMAT_BIN.is_file() and os.access(FORMAT_BIN, os.X_OK),
         "qwen_runtime": bool(env["qwen_runtime_installed"]),
-        "qwen_model": _model_files_complete(qwen_model, QWEN_FILES),
+        "qwen_model": _model_files_complete(
+            qwen_model, QWEN_FILES, QWEN_SHA256, QWEN_REVISION,
+            verify_hashes=env["qwen_model_source"] == "managed",
+        ),
         "qwen_bridge": BRIDGE.is_file(),
         "mel_runtime": bool(env["separator_runtime_installed"]),
-        "mel_model": _model_files_complete(mel_model_dir, MEL_FILES),
+        "mel_model": _model_files_complete(
+            mel_model_dir, MEL_FILES, MEL_SHA256, MEL_REVISION,
+            verify_hashes=env["mel_model_source"] == "managed",
+        ),
         "mel_config": (mel_model_dir / "config_deux_becruily.yaml").is_file(),
         "mel_ffmpeg": locate_ffmpeg() is not None,
-        "asr_optional": bool(env["asr_runtime_installed"]) and _model_files_complete(asr_model, WHISPER_FILES),
+        "asr_optional": bool(env["asr_runtime_installed"]) and _model_files_complete(
+            asr_model, WHISPER_FILES, WHISPER_SHA256, WHISPER_REVISION,
+            verify_hashes=env["asr_model_source"] == "managed",
+        ),
     }
     required = [
         "bundled_python_core",
@@ -318,7 +389,8 @@ def cmd_separate(args: argparse.Namespace) -> int:
             i_out = unique_path(out_dir / f"{src.stem} (Instrumental){inst.suffix or ext}")
             shutil.copy2(inst, i_out)
             result["instrumental"] = str(i_out)
-        append_history("separate", str(src), str(out_dir))
+        history_output = result.get("instrumental") or result.get("vocals") or str(out_dir)
+        append_history("separate", str(src), history_output)
         return emit(result)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -509,11 +581,61 @@ def resolve_environment() -> dict:
     }
 
 
-def _model_files_complete(folder: Path, files: dict[str, int]) -> bool:
+def _write_model_manifest(folder: Path, revision: str, files: dict[str, int], hashes: dict[str, str]) -> None:
+    entries = {}
+    for relpath, expected_size in files.items():
+        target = folder / relpath
+        stat = target.stat()
+        entries[relpath] = {
+            "size": expected_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "sha256": hashes[relpath],
+        }
+    payload = {"revision": revision, "files": entries}
+    (folder / ".spp-verified.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+
+def _model_files_complete(
+    folder: Path,
+    files: dict[str, int],
+    hashes: dict[str, str] | None = None,
+    revision: str = "",
+    verify_hashes: bool = False,
+) -> bool:
     for relpath, expected_size in files.items():
         target = folder / relpath
         if not target.is_file() or target.stat().st_size != expected_size:
             return False
+    if not verify_hashes or not hashes:
+        return True
+
+    manifest_path = folder / ".spp-verified.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        manifest = {}
+    cached_files = manifest.get("files", {}) if manifest.get("revision") == revision else {}
+    changed = manifest.get("revision") != revision
+    for relpath, expected_size in files.items():
+        target = folder / relpath
+        stat = target.stat()
+        cached = cached_files.get(relpath, {})
+        if (
+            cached.get("size") == expected_size
+            and cached.get("mtime_ns") == stat.st_mtime_ns
+            and cached.get("sha256") == hashes[relpath]
+        ):
+            continue
+        if sha256_file(target) != hashes[relpath]:
+            return False
+        changed = True
+    if changed:
+        try:
+            _write_model_manifest(folder, revision, files, hashes)
+        except OSError:
+            pass
     return True
 
 
@@ -533,19 +655,28 @@ def cmd_model_status(_: argparse.Namespace) -> int:
                 "repo": WHISPER_REPO,
                 "path": str(env["asr_model"]),
                 "source": env["asr_model_source"],
-                "installed": _model_files_complete(Path(env["asr_model"]), WHISPER_FILES),
+                "installed": _model_files_complete(
+                    Path(env["asr_model"]), WHISPER_FILES, WHISPER_SHA256, WHISPER_REVISION,
+                    verify_hashes=env["asr_model_source"] == "managed",
+                ),
             },
             "qwen": {
                 "repo": QWEN_REPO,
                 "path": str(env["qwen_model"]),
                 "source": env["qwen_model_source"],
-                "installed": _model_files_complete(qwen_model_path, QWEN_FILES),
+                "installed": _model_files_complete(
+                    qwen_model_path, QWEN_FILES, QWEN_SHA256, QWEN_REVISION,
+                    verify_hashes=env["qwen_model_source"] == "managed",
+                ),
             },
             "mel_deux": {
                 "repo": MEL_REPO,
                 "path": str(env["mel_model_dir"]),
                 "source": env["mel_model_source"],
-                "installed": _model_files_complete(mel_model_path, MEL_FILES),
+                "installed": _model_files_complete(
+                    mel_model_path, MEL_FILES, MEL_SHA256, MEL_REVISION,
+                    verify_hashes=env["mel_model_source"] == "managed",
+                ),
             },
         },
         "runtime": {
@@ -797,6 +928,8 @@ def _endpoint_order(source: str) -> list[str]:
 
 def _model_download_url(endpoint: str, repo: str, revision: str, relpath: str) -> str:
     if endpoint == MODELSCOPE_ENDPOINT:
+        # ModelScope does not accept the Hugging Face commit SHA for this mirror.
+        # Its master branch is therefore allowed only with the per-file SHA256 checks below.
         return (
             f"{endpoint}/api/v1/models/{repo}/repo"
             f"?Revision=master&FilePath={quote_plus(relpath)}"
@@ -809,20 +942,29 @@ def _download_one(
     revision: str,
     relpath: str,
     expected_size: int,
+    expected_sha256: str,
     target: Path,
     source: str,
     endpoint_order: list[str] | None = None,
 ) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.is_file() and target.stat().st_size == expected_size:
+        actual_sha256 = sha256_file(target)
+        if actual_sha256 == expected_sha256:
+            print(json.dumps({
+                "event": "skip", "file": relpath, "bytes": expected_size,
+                "sha256": actual_sha256
+            }, ensure_ascii=False), flush=True)
+            return
         print(json.dumps({
-            "event": "skip", "file": relpath, "bytes": expected_size
+            "event": "checksum_mismatch", "file": relpath,
+            "expected_sha256": expected_sha256, "actual_sha256": actual_sha256
         }, ensure_ascii=False), flush=True)
-        return
 
-    part = target.with_suffix(target.suffix + ".part")
     errors = []
     for endpoint in (endpoint_order or _endpoint_order(source)):
+        endpoint_tag = re.sub(r"[^A-Za-z0-9]+", "-", endpoint).strip("-")[-48:] or "source"
+        part = target.with_suffix(target.suffix + f".part.{endpoint_tag}")
         url = _model_download_url(endpoint, repo, revision, relpath)
         print(json.dumps({
             "event": "download_start", "file": relpath,
@@ -835,12 +977,20 @@ def _download_one(
         ]
         proc = subprocess.run(cmd)
         if proc.returncode == 0 and part.is_file() and part.stat().st_size == expected_size:
-            part.replace(target)
-            print(json.dumps({
-                "event": "download_done", "file": relpath,
-                "bytes": expected_size, "endpoint": endpoint
-            }, ensure_ascii=False), flush=True)
-            return
+            actual_sha256 = sha256_file(part)
+            if actual_sha256 == expected_sha256:
+                part.replace(target)
+                print(json.dumps({
+                    "event": "download_done", "file": relpath,
+                    "bytes": expected_size, "sha256": actual_sha256, "endpoint": endpoint
+                }, ensure_ascii=False), flush=True)
+                return
+            errors.append(f"{endpoint}: checksum={actual_sha256}")
+            try:
+                part.unlink()
+            except OSError:
+                pass
+            continue
         errors.append(f"{endpoint}: curl={proc.returncode}, size={part.stat().st_size if part.exists() else 0}")
     raise RuntimeError(f"下载失败 {relpath}: " + " | ".join(errors))
 
@@ -851,15 +1001,15 @@ def cmd_model_download(args: argparse.Namespace) -> int:
     source = args.source or settings.get("download_source", "auto")
     endpoint_order: list[str] | None = None
     if args.model == "qwen":
-        repo, revision, files = QWEN_REPO, QWEN_REVISION, QWEN_FILES
+        repo, revision, files, hashes = QWEN_REPO, QWEN_REVISION, QWEN_FILES, QWEN_SHA256
         target_dir = MODEL_DIR / "Qwen3-TTS-12Hz-1.7B-Base-8bit"
         source = "modelscope"
         endpoint_order = [MODELSCOPE_ENDPOINT]
     elif args.model == "whisper":
-        repo, revision, files = WHISPER_REPO, WHISPER_REVISION, WHISPER_FILES
+        repo, revision, files, hashes = WHISPER_REPO, WHISPER_REVISION, WHISPER_FILES, WHISPER_SHA256
         target_dir = MODEL_DIR / "whisper-turbo"
     else:
-        repo, revision, files = MEL_REPO, MEL_REVISION, MEL_FILES
+        repo, revision, files, hashes = MEL_REPO, MEL_REVISION, MEL_FILES, MEL_SHA256
         target_dir = MODEL_DIR / "Mel-Deux"
 
     try:
@@ -870,9 +1020,10 @@ def cmd_model_download(args: argparse.Namespace) -> int:
         }, ensure_ascii=False), flush=True)
         for relpath, size in files.items():
             _download_one(
-                repo, revision, relpath, size, target_dir / relpath, source,
+                repo, revision, relpath, size, hashes[relpath], target_dir / relpath, source,
                 endpoint_order=endpoint_order,
             )
+        _write_model_manifest(target_dir, revision, files, hashes)
         print(json.dumps({
             "event": "model_done", "model": args.model,
             "path": str(target_dir), "total_bytes": total
@@ -1124,11 +1275,41 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _task_history_identity(args: argparse.Namespace) -> tuple[str, str] | None:
+    if args.command == "convert":
+        return "convert", str(args.input)
+    if args.command == "separate":
+        return "separate", str(args.input)
+    if args.command == "clone":
+        return "clone", str(args.ref_audio)
+    if args.command == "voice-clone":
+        return "clone", f"voice:{args.id}"
+    return None
+
+
 def main() -> int:
     ensure_dirs()
     parser = build_parser()
     args = parser.parse_args()
-    return int(args.func(args))
+    history_identity = _task_history_identity(args)
+    if not history_identity:
+        return int(args.func(args))
+
+    kind, source = history_identity
+    with task_lock():
+        try:
+            code = int(args.func(args))
+        except Exception as exc:
+            code = emit({"ok": False, "error": str(exc)}, 4)
+        if LAST_EMIT_PAYLOAD and LAST_EMIT_PAYLOAD.get("ok") is False:
+            try:
+                append_history(
+                    kind, source, "", status="failed",
+                    detail=str(LAST_EMIT_PAYLOAD.get("error", "任务失败"))[-2000:],
+                )
+            except OSError:
+                pass
+    return code
 
 
 if __name__ == "__main__":
