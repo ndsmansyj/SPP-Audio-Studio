@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="${VERSION:-1.0.0}"
-BUILD_NUMBER="${BUILD_NUMBER:-109}"
+BUILD_NUMBER="${BUILD_NUMBER:-110}"
 SOURCE_COMMIT="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
 SOURCE_DESCRIBE="$(git -C "$ROOT" describe --tags --always 2>/dev/null || echo unknown)"
 SOURCE_STATE="dirty"
