@@ -2,14 +2,17 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${VERSION:-1.0.0}"
-BUILD_NUMBER="${BUILD_NUMBER:-110}"
+VERSION="${VERSION:-1.0.1}"
+BUILD_NUMBER="${BUILD_NUMBER:-111}"
 SOURCE_COMMIT="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
 SOURCE_DESCRIBE="$(git -C "$ROOT" describe --tags --always 2>/dev/null || echo unknown)"
 SOURCE_STATE="dirty"
 if [ -z "$(git -C "$ROOT" status --porcelain --untracked-files=normal 2>/dev/null)" ]; then SOURCE_STATE="clean"; fi
 BUILD_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 STAMP="$(date +%Y%m%d-%H%M%S)"
+MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
+export MACOSX_DEPLOYMENT_TARGET
+TARGET="arm64-apple-macos${MACOSX_DEPLOYMENT_TARGET}"
 BUILD="$ROOT/build/$STAMP"
 APP="$BUILD/SPP Audio Studio.app"
 PYTHON_CORE_SOURCE="${SPP_PYTHON_CORE_SOURCE:-$HOME/.local/share/uv/python/cpython-3.11.15-macos-aarch64-none}"
@@ -33,7 +36,7 @@ printf 'version=%s\nbuild=%s\nsource_commit=%s\nsource_describe=%s\nsource_state
 # scaling so the selected pixel-art look stays crisp in Finder and Dock.
 cp "$ROOT/assets/icon/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
-swiftc -swift-version 5 -parse-as-library "$ROOT/app/SPPAudioStudio.swift" \
+swiftc -swift-version 5 -parse-as-library -target "$TARGET" "$ROOT/app/SPPAudioStudio.swift" \
   -framework SwiftUI -framework AppKit -framework AVFoundation -framework UniformTypeIdentifiers \
   -o "$APP/Contents/MacOS/SPPAudioStudio"
 
@@ -44,11 +47,24 @@ cp "$ROOT/assets/default_voice/reference.wav" "$ROOT/assets/default_voice/refere
 ditto "$PYTHON_CORE_SOURCE" "$APP/Contents/Resources/runtime/python"
 chmod 755 "$APP/Contents/Resources/runtime/python/bin/python3.11"
 
-swiftc -O "$ROOT/format_converter/main.swift" \
+swiftc -O -target "$TARGET" "$ROOT/format_converter/main.swift" \
   -framework AppKit -framework UniformTypeIdentifiers \
   -o "$APP/Contents/Resources/bin/format_converter"
 
 chmod 755 "$APP/Contents/MacOS/SPPAudioStudio" "$APP/Contents/Resources/bin/format_converter"
+
+verify_minos() {
+  local binary="$1"
+  local actual
+  actual="$(otool -l "$binary" | awk '$1 == "minos" { print $2; exit }')"
+  if [ "$actual" != "$MACOSX_DEPLOYMENT_TARGET" ]; then
+    echo "Deployment target mismatch: $binary has minos $actual, expected $MACOSX_DEPLOYMENT_TARGET" >&2
+    exit 3
+  fi
+}
+
+verify_minos "$APP/Contents/MacOS/SPPAudioStudio"
+verify_minos "$APP/Contents/Resources/bin/format_converter"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -66,7 +82,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <key>SPPSourceDescribe</key><string>$SOURCE_DESCRIBE</string>
 <key>SPPSourceTreeState</key><string>$SOURCE_STATE</string>
 <key>SPPBuildUTC</key><string>$BUILD_UTC</string>
-<key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>LSMinimumSystemVersion</key><string>$MACOSX_DEPLOYMENT_TARGET</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST

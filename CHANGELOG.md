@@ -2,6 +2,13 @@
 
 This file tracks public, user-facing changes. Internal RC test notes and handoff documents are intentionally kept out of the public project tree.
 
+## 1.0.1 — 2026-09-23
+
+### macOS
+- Fixed the release build deployment target so the Apple Silicon app and bundled format converter genuinely support macOS 14+, matching the documented requirement.
+- Added a packaging-time Mach-O minimum-version check to fail the build if the compiled binaries drift above the configured macOS deployment target.
+- Bumped the macOS app to build 111. No feature behavior changed.
+
 ## 1.0.0 — 2026-09-22
 
 ### Project
