@@ -3,7 +3,12 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="${VERSION:-1.0.0}"
-BUILD_NUMBER="${BUILD_NUMBER:-108}"
+BUILD_NUMBER="${BUILD_NUMBER:-109}"
+SOURCE_COMMIT="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+SOURCE_DESCRIBE="$(git -C "$ROOT" describe --tags --always 2>/dev/null || echo unknown)"
+SOURCE_STATE="dirty"
+if [ -z "$(git -C "$ROOT" status --porcelain --untracked-files=normal 2>/dev/null)" ]; then SOURCE_STATE="clean"; fi
+BUILD_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BUILD="$ROOT/build/$STAMP"
 APP="$BUILD/SPP Audio Studio.app"
@@ -20,6 +25,9 @@ mkdir -p "$APP/Contents/Resources/worker"
 mkdir -p "$APP/Contents/Resources/bin"
 mkdir -p "$APP/Contents/Resources/default_voice"
 mkdir -p "$APP/Contents/Resources/runtime"
+printf 'version=%s\nbuild=%s\nsource_commit=%s\nsource_describe=%s\nsource_state=%s\nbuilt_at_utc=%s\n' \
+  "$VERSION" "$BUILD_NUMBER" "$SOURCE_COMMIT" "$SOURCE_DESCRIBE" "$SOURCE_STATE" "$BUILD_UTC" \
+  > "$APP/Contents/Resources/BUILD-INFO.txt"
 
 # Use the prebuilt pixel-art iconset/ICNS. It is generated with nearest-neighbour
 # scaling so the selected pixel-art look stays crisp in Finder and Dock.
@@ -54,6 +62,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundleShortVersionString</key><string>$VERSION</string>
 <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
+<key>SPPSourceCommit</key><string>$SOURCE_COMMIT</string>
+<key>SPPSourceDescribe</key><string>$SOURCE_DESCRIBE</string>
+<key>SPPSourceTreeState</key><string>$SOURCE_STATE</string>
+<key>SPPBuildUTC</key><string>$BUILD_UTC</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>

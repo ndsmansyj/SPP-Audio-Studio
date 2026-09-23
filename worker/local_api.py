@@ -12,11 +12,13 @@ from pathlib import Path
 
 WORKER = Path(__file__).with_name("spp_worker.py")
 PYTHON = Path(__file__).resolve().parent.parent / "runtime/python/bin/python3.11"
-WORKER_LOCK = threading.Lock()
+API_REQUEST_LOCK = threading.Lock()
+# This only serializes callers inside the API server. User jobs are also protected
+# across App/API worker processes by spp_worker.py's macOS task lock.
 
 
 def run_worker(args):
-    with WORKER_LOCK:
+    with API_REQUEST_LOCK:
         proc = subprocess.run([str(PYTHON), str(WORKER), *args], capture_output=True, text=True, timeout=3600)
     lines = proc.stdout.strip().splitlines()
     try:

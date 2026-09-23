@@ -175,6 +175,48 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
     override init() {
         super.init()
         logger.append("app.log", "app launch version=\(appVersion)")
+        loadPersistedHistory()
+    }
+
+    private var historyURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/SPP Audio Studio/history.jsonl")
+    }
+
+    private func loadPersistedHistory() {
+        let url = historyURL
+        DispatchQueue.global(qos: .utility).async {
+            guard let data = try? Data(contentsOf: url),
+                  let text = String(data: data, encoding: .utf8) else { return }
+            let fm = FileManager.default
+            let loaded: [TaskItem] = text.split(separator: "\n").suffix(200).reversed().compactMap { row in
+                guard let rowData = String(row).data(using: .utf8),
+                      let item = try? JSONSerialization.jsonObject(with: rowData) as? [String: Any] else { return nil }
+                let kind = item["kind"] as? String ?? ""
+                let mode = kind == "convert" ? "转换" : (kind == "separate" ? "分离" : "声音克隆")
+                let failed = (item["status"] as? String) == "failed"
+                let source = item["source"] as? String ?? ""
+                let output = item["output"] as? String ?? ""
+                var title = kind == "clone" ? "声音克隆" : URL(fileURLWithPath: source).lastPathComponent
+                if title.isEmpty { title = mode }
+                var outputPath: String?
+                if !output.isEmpty {
+                    var isDirectory: ObjCBool = false
+                    if fm.fileExists(atPath: output, isDirectory: &isDirectory), !isDirectory.boolValue {
+                        outputPath = output
+                        if kind == "clone" { title = URL(fileURLWithPath: output).lastPathComponent }
+                    }
+                }
+                var detail = item["detail"] as? String ?? ""
+                if detail.isEmpty { detail = failed ? "历史任务失败" : "历史记录" }
+                if let time = item["time"] as? String, !time.isEmpty {
+                    detail += " · " + time.replacingOccurrences(of: "T", with: " ")
+                }
+                return TaskItem(title: title, mode: mode, status: failed ? "失败" : "完成", detail: detail, outputPath: outputPath)
+            }
+            guard !loaded.isEmpty else { return }
+            DispatchQueue.main.async { self.tasks.append(contentsOf: loaded) }
+        }
     }
 
     private var appVersion: String {
@@ -256,10 +298,23 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
             throw WorkerError.message(message)
         }
 
-        process.waitUntilExit()
+        var outData = Data()
+        var errData = Data()
+        let readGroup = DispatchGroup()
+        readGroup.enter()
+        DispatchQueue.global(qos: .utility).async {
+            outData = stdout.fileHandleForReading.readDataToEndOfFile()
+            readGroup.leave()
+        }
+        readGroup.enter()
+        DispatchQueue.global(qos: .utility).async {
+            errData = stderr.fileHandleForReading.readDataToEndOfFile()
+            readGroup.leave()
+        }
 
-        let outData = stdout.fileHandleForReading.readDataToEndOfFile()
-        let errData = stderr.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        readGroup.wait()
+
         let outText = String(data: outData, encoding: .utf8) ?? ""
         let errText = String(data: errData, encoding: .utf8) ?? ""
         let jsonLine = outText.split(separator: "\n").map(String.init).last { $0.hasPrefix("{") }
