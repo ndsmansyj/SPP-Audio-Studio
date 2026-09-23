@@ -10,7 +10,7 @@ Windows · macOS
 
 格式转换 · 人声分离 · 声音克隆
 
-**Stable · v1.0.1**
+**Stable · v1.0.0**
 
 [下载最新版本](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/latest)
 
@@ -27,7 +27,7 @@ SPP Audio Studio 把常用的本地音频处理集中到一个简单的桌面应
 | 平台 | 安装包 | 运行要求 |
 | --- | --- | --- |
 | **Windows** | `SPPAudioStudio-1.0.0-win-x64.zip` | Windows 10 / 11 x64；AI 功能推荐 NVIDIA GPU |
-| **macOS** | `SPP-Audio-Studio-1.0.1.dmg` | Apple Silicon · macOS 14+ |
+| **macOS** | `SPP-Audio-Studio-1.0.0.dmg` | Apple Silicon · macOS 14+ |
 
 Release 页面同时列出对应安装包的 SHA-256 校验值。
 
