@@ -1,13 +1,35 @@
-name: Cloud CI
+name: SPP Cloud CI
 
 on:
   push:
     branches:
+      - main
       - test/chatgpt-actions-smoke-20260924
+    paths:
+      - ".github/workflows/cloud-ci.yml"
+      - "app/**"
+      - "worker/**"
+      - "format_converter/**"
+      - "windows/**"
+      - "scripts/**"
+      - "assets/**"
+  pull_request:
+    paths:
+      - ".github/workflows/cloud-ci.yml"
+      - "app/**"
+      - "worker/**"
+      - "format_converter/**"
+      - "windows/**"
+      - "scripts/**"
+      - "assets/**"
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: spp-cloud-ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   DOTNET_NOLOGO: "true"
@@ -29,25 +51,33 @@ jobs:
           test -f windows/build.ps1
           test -f scripts/build_local.sh
 
-  macos-compile:
-    name: macOS ARM compile check
+  macos-package:
+    name: macOS ARM build + DMG
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Toolchain
+      - name: Install uv
         run: |
-          uname -a
-          swiftc --version
-      - name: Compile macOS app
-        run: |
-          mkdir -p build-ci
-          swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos14.0 app/SPPAudioStudio.swift \
-            -framework SwiftUI -framework AppKit -framework AVFoundation -framework UniformTypeIdentifiers \
-            -o build-ci/SPPAudioStudio
-          swiftc -O -target arm64-apple-macos14.0 format_converter/main.swift \
-            -framework AppKit -framework UniformTypeIdentifiers \
-            -o build-ci/format_converter
-          file build-ci/SPPAudioStudio build-ci/format_converter
+          if ! command -v uv >/dev/null 2>&1; then
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
+      - name: Install relocatable Python 3.11 core
+        run: uv python install 3.11.15
+      - name: Build macOS DMG
+        env:
+          VERSION: 0.0.${{ github.run_number }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: ./scripts/build_local.sh
+      - name: Upload macOS package
+        uses: actions/upload-artifact@v4
+        with:
+          name: spp-audio-studio-macos-arm64
+          path: |
+            build/*/SPP-Audio-Studio-*.dmg
+            build/*/SPP-Audio-Studio-*.dmg.sha256
+          if-no-files-found: error
+          retention-days: 7
 
   windows-package:
     name: Windows x64 build + package
