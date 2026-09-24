@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - test/chatgpt-actions-smoke-20260924
     paths:
       - ".github/workflows/cloud-ci.yml"
       - "app/**"
