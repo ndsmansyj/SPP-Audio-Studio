@@ -1,0 +1,30 @@
+name: ChatGPT Actions Smoke
+
+on:
+  push:
+    branches:
+      - test/chatgpt-actions-smoke-20260924
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Environment smoke test
+        run: |
+          python --version
+          python -c "import platform; print(platform.platform()); print(platform.machine())"
+          git rev-parse --short HEAD
