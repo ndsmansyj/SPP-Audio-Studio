@@ -1,0 +1,114 @@
+name: SPP Cloud CI
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/cloud-ci.yml"
+      - "app/**"
+      - "worker/**"
+      - "format_converter/**"
+      - "windows/**"
+      - "scripts/**"
+      - "assets/**"
+  pull_request:
+    paths:
+      - ".github/workflows/cloud-ci.yml"
+      - "app/**"
+      - "worker/**"
+      - "format_converter/**"
+      - "windows/**"
+      - "scripts/**"
+      - "assets/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spp-cloud-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  quick-check:
+    name: Quick checks (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Python syntax check
+        run: python -m compileall -q worker windows/worker
+      - name: Repository sanity
+        run: |
+          test -f app/SPPAudioStudio.swift
+          test -f windows/SPPAudioStudio.Windows.sln
+          test -f windows/build.ps1
+          test -f scripts/build_local.sh
+
+  macos-package:
+    name: macOS ARM build + DMG
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        run: |
+          if ! command -v uv >/dev/null 2>&1; then
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
+      - name: Install relocatable Python 3.11 core
+        run: uv python install 3.11.15
+      - name: Build macOS DMG
+        env:
+          VERSION: 0.0.${{ github.run_number }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: ./scripts/build_local.sh
+      - name: Upload macOS package
+        uses: actions/upload-artifact@v4
+        with:
+          name: spp-audio-studio-macos-arm64
+          path: |
+            build/*/SPP-Audio-Studio-*.dmg
+            build/*/SPP-Audio-Studio-*.dmg.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  windows-package:
+    name: Windows x64 build + package
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.425
+      - uses: actions/setup-python@v5
+        with:
+          python-version: 3.11.9
+          cache: pip
+          cache-dependency-path: windows/requirements-build.txt
+      - name: Validate packaging scripts
+        shell: pwsh
+        run: python -m unittest windows.tests.test_packaging -v
+      - name: Bootstrap build environment
+        shell: pwsh
+        run: ./windows/bootstrap.ps1
+      - name: Build and test
+        shell: pwsh
+        run: ./windows/build.ps1 -Configuration Release -Platform x64
+      - name: Publish portable package
+        shell: pwsh
+        run: ./windows/publish.ps1 -Platform x64 -Version "0.0.${{ github.run_number }}"
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: spp-audio-studio-win-x64
+          path: |
+            windows/artifacts/packages/*.zip
+            windows/artifacts/packages/*.sha256
+          if-no-files-found: error
+          retention-days: 7
