@@ -16,6 +16,12 @@ jobs:
         with:
           dotnet-version: 8.0.425
       - uses: microsoft/setup-msbuild@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Test Windows worker and CUDA DLL bootstrap (model-free)
+        shell: pwsh
+        run: python -m unittest discover -s windows/tests -p 'test*.py' -v
       - name: Build self-contained WinUI3 app
         shell: pwsh
         run: |

@@ -65,27 +65,80 @@ def require_cuda(torch_module) -> None:
         raise RuntimeError("CUDA 不可用；AI 推理禁止回退到 CPU")
 
 
+def find_asr_cuda_dll_directory() -> Path | None:
+    """Find a complete cuBLAS 12 pair installed in one managed runtime.
+
+    ASR is deliberately lightweight: the CUDA libraries live in the existing
+    Qwen/Mel PyTorch runtime instead of being installed system-wide. Do not
+    scan arbitrary site-packages DLL directories or require a global PATH.
+    """
+    candidates: list[Path] = []
+    configured = os.environ.get("SPP_ASR_CUDA_DLL_DIR", "")
+    if configured:
+        candidates.append(Path(configured))
+    if ASR_SITE:
+        site = Path(ASR_SITE)
+        runtime = site.parent.parent  # Runtime/asr/site-packages -> Runtime/
+        candidates.extend([
+            site / "ctranslate2",
+            site / "nvidia" / "cublas" / "bin",
+            runtime / "qwen" / "site-packages" / "torch" / "lib",
+            runtime / "mel" / "site-packages" / "torch" / "lib",
+        ])
+    for directory in candidates:
+        if (directory / "cublas64_12.dll").is_file() and (directory / "cublasLt64_12.dll").is_file():
+            return directory
+    return None
+
+
+def build_asr_environment() -> dict[str, str]:
+    """Provide CUDA 12 DLL search paths to the independent Whisper process."""
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONNOUSERSITE"] = "1"
+    if ASR_SITE:
+        env["PYTHONPATH"] = ASR_SITE
+    dll_dir = find_asr_cuda_dll_directory()
+    if dll_dir is not None:
+        env["SPP_ASR_CUDA_DLL_DIR"] = str(dll_dir)
+        # CTranslate2 dynamically calls LoadLibrary for cuBLAS. Besides
+        # os.add_dll_directory, explicitly prefix the child process PATH.
+        env["PATH"] = str(dll_dir) + os.pathsep + env.get("PATH", "")
+    return env
+
+
 def transcribe(wav_path: Path) -> str:
     if not ASR_PY.is_file() or not ASR_MODEL.exists():
         raise RuntimeError("参考文本为空，但本机没有可用的 Whisper ASR；请填写参考文本。")
     script = (
-        "import sys\n"
+        "import os, sys\n"
+        "if sys.platform == 'win32' and os.environ.get('SPP_ASR_CUDA_DLL_DIR'):\n"
+        "    import ctypes\n"
+        "    directory = os.environ['SPP_ASR_CUDA_DLL_DIR']\n"
+        "    _dll_search_handle = os.add_dll_directory(directory)\n"
+        "    # Load by full path before CTranslate2 lazily resolves their names.\n"
+        "    _cuda_dll_handles = [ctypes.WinDLL(os.path.join(directory, dll))\n"
+        "                         for dll in ('cublasLt64_12.dll', 'cublas64_12.dll')]\n"
         "from faster_whisper import WhisperModel\n"
         "model = WhisperModel(sys.argv[2], device='cuda', device_index=0, compute_type='float16')\n"
         "segments, _ = model.transcribe(sys.argv[1], language='zh')\n"
         "print(''.join(s.text for s in segments).strip())\n"
     )
-    env = os.environ.copy()
-    env.pop("PYTHONPATH", None)
-    if ASR_SITE:
-        env["PYTHONPATH"] = ASR_SITE
     command = [str(ASR_PY), "-c", script, str(wav_path), str(ASR_MODEL)]
     proc = subprocess.run(
-        command,
-        capture_output=True, text=True, env=env, timeout=300
+        command, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=build_asr_environment(), timeout=300
     )
     if proc.returncode != 0:
-        raise RuntimeError("转写失败：" + (proc.stderr or proc.stdout)[-500:])
+        detail = (proc.stderr or proc.stdout or "").strip()
+        if re.search(r"cublas(?:Lt)?64_12\.dll", detail, flags=re.IGNORECASE):
+            raise RuntimeError(
+                "Whisper GPU 转写无法加载 CUDA 12 cuBLAS。请检查 Qwen/Mel Runtime；"
+                "也可以先在『临时参考音的原话』填写音频中的实际内容以跳过自动转写。"
+                + (" 详细信息：" + detail[-400:] if detail else "")
+            )
+        raise RuntimeError("转写失败：" + detail[-900:])
     return proc.stdout.strip()
 
 
