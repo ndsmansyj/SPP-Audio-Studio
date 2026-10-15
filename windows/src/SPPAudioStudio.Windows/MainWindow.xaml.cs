@@ -71,8 +71,13 @@ public sealed partial class MainWindow : Window
     private CancellationTokenSource? _cloneCancellation;
     private readonly List<CloneJob> _cloneJobs = [];
     private MediaPlayer? _inlinePlayer;
-    private MediaPlayerElement? _inlinePlayerElement;
+    private StackPanel? _inlinePlaybackControls;
+    private Slider? _inlineProgressSlider;
+    private TextBlock? _inlineTimeLabel;
     private TextBlock? _inlineNowPlaying;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _inlinePlaybackTimer;
+    private bool _inlineUpdatingProgress;
+    private int _inlineLoadGeneration;
     private string? _inlinePlayerPath;
     private Button? _inlinePlayerButton;
     private string _lastDoctorJson = "";
@@ -647,15 +652,44 @@ public sealed partial class MainWindow : Window
             TextTrimming = TextTrimming.CharacterEllipsis
         };
         body.Children.Add(_inlineNowPlaying);
-        _inlinePlayerElement = new MediaPlayerElement
+        // Avoid activating the MediaPlayerElement XAML transport template in the
+        // portable WinUI build. Audio still plays inside the app via MediaPlayer.
+        _inlinePlaybackControls = new StackPanel { Spacing = 4, Visibility = Visibility.Collapsed };
+        var timeline = new Grid { ColumnSpacing = 8 };
+        timeline.ColumnDefinitions.Add(new ColumnDefinition());
+        timeline.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        _inlineProgressSlider = new Slider
         {
-            AreTransportControlsEnabled = true,
-            AutoPlay = false,
-            Height = 72,
-            Visibility = Visibility.Collapsed,
+            Minimum = 0,
+            Maximum = 1,
+            IsEnabled = false,
+            VerticalAlignment = VerticalAlignment.Center,
             HorizontalAlignment = HorizontalAlignment.Stretch
         };
-        body.Children.Add(_inlinePlayerElement);
+        _inlineProgressSlider.ValueChanged += (_, _) =>
+        {
+            if (_inlineUpdatingProgress || _inlinePlayer is null || _inlineProgressSlider is null) return;
+            try
+            {
+                var duration = _inlinePlayer.PlaybackSession.NaturalDuration;
+                if (duration <= TimeSpan.Zero) return;
+                _inlinePlayer.PlaybackSession.Position =
+                    TimeSpan.FromSeconds(Math.Clamp(_inlineProgressSlider.Value, 0, duration.TotalSeconds));
+            }
+            catch (Exception error) { Debug.WriteLine($"SPP seek failed: {error}"); }
+        };
+        timeline.Children.Add(_inlineProgressSlider);
+        _inlineTimeLabel = new TextBlock
+        {
+            Text = "00:00 / 00:00",
+            FontSize = 11,
+            Foreground = MutedBrush,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        Grid.SetColumn(_inlineTimeLabel, 1);
+        timeline.Children.Add(_inlineTimeLabel);
+        _inlinePlaybackControls.Children.Add(timeline);
+        body.Children.Add(_inlinePlaybackControls);
         body.Children.Add(ActionButton("清空等待", ClearWaitingCloneJobs));
         return Card(body, 16);
     }
@@ -840,6 +874,8 @@ public sealed partial class MainWindow : Window
             var isPlaying = string.Equals(_inlinePlayerPath, job.OutputPath, StringComparison.OrdinalIgnoreCase)
                 && _inlinePlayer?.PlaybackSession.PlaybackState == MediaPlaybackState.Playing;
             play = ActionButton(isPlaying ? "暂停" : "播放", () => ToggleInlinePlayback(job.OutputPath, play));
+            if (string.Equals(_inlinePlayerPath, job.OutputPath, StringComparison.OrdinalIgnoreCase))
+                _inlinePlayerButton = play;
             actions.Children.Add(play);
             actions.Children.Add(ActionButton("打开位置", () => OpenOutput(job.OutputPath!)));
             body.Children.Add(actions);
@@ -952,56 +988,138 @@ public sealed partial class MainWindow : Window
 
     private async void ToggleInlinePlayback(string? path, Button? button)
     {
-        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path) || button is null) return;
+        if (button is null) return;
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            button.Content = "文件不存在";
+            return;
+        }
+
+        // Only the newest async file-open request is allowed to start playback.
+        var request = ++_inlineLoadGeneration;
         try
         {
             _inlinePlayer ??= CreateInlinePlayer();
-            if (_inlinePlayerElement is not null)
+            var session = _inlinePlayer.PlaybackSession;
+            if (string.Equals(_inlinePlayerPath, path, StringComparison.OrdinalIgnoreCase))
             {
-                _inlinePlayerElement.SetMediaPlayer(_inlinePlayer);
-                _inlinePlayerElement.Visibility = Visibility.Visible;
+                _inlinePlayerButton = button;
+                if (session.PlaybackState == MediaPlaybackState.Playing)
+                {
+                    _inlinePlayer.Pause();
+                    _inlinePlaybackTimer?.Stop();
+                    button.Content = "播放";
+                    return;
+                }
+                if (session.PlaybackState == MediaPlaybackState.Paused)
+                {
+                    if (session.NaturalDuration > TimeSpan.Zero && session.Position >= session.NaturalDuration)
+                        session.Position = TimeSpan.Zero;
+                    _inlinePlayer.Play();
+                    EnsureInlinePlaybackTimer();
+                    _inlinePlaybackTimer?.Start();
+                    button.Content = "暂停";
+                    return;
+                }
             }
+
+            // The output is a local file. Do not create or reveal an XAML
+            // MediaPlayerElement; its transport template is the suspected crash path.
+            var file = await StorageFile.GetFileFromPathAsync(path);
+            if (request != _inlineLoadGeneration) return;
+            if (_inlinePlayerButton is not null && _inlinePlayerButton != button)
+                _inlinePlayerButton.Content = "播放";
+
+            _inlinePlayer.Source = MediaSource.CreateFromStorageFile(file);
+            _inlinePlayerPath = path;
+            _inlinePlayerButton = button;
             if (_inlineNowPlaying is not null)
             {
                 _inlineNowPlaying.Text = $"正在播放：{IOPath.GetFileName(path)}";
                 _inlineNowPlaying.Visibility = Visibility.Visible;
             }
-
-            if (string.Equals(_inlinePlayerPath, path, StringComparison.OrdinalIgnoreCase)
-                && _inlinePlayer.PlaybackSession.PlaybackState == MediaPlaybackState.Playing)
-            {
-                _inlinePlayer.Pause();
-                button.Content = "播放";
-                return;
-            }
-
-            if (_inlinePlayerButton is not null && _inlinePlayerButton != button)
-                _inlinePlayerButton.Content = "播放";
-
-            var file = await StorageFile.GetFileFromPathAsync(path);
-            _inlinePlayer.Source = MediaSource.CreateFromStorageFile(file);
-            _inlinePlayerPath = path;
-            _inlinePlayerButton = button;
+            if (_inlinePlaybackControls is not null)
+                _inlinePlaybackControls.Visibility = Visibility.Visible;
             _inlinePlayer.Play();
             button.Content = "暂停";
+            EnsureInlinePlaybackTimer();
+            _inlinePlaybackTimer?.Start();
+            UpdateInlinePlaybackPosition();
         }
-        catch
+        catch (Exception error)
         {
+            Debug.WriteLine($"SPP inline playback failed: {error}");
+            _inlinePlaybackTimer?.Stop();
             button.Content = "播放失败";
+            if (_inlineNowPlaying is not null)
+            {
+                _inlineNowPlaying.Text = $"试听失败：{error.Message}";
+                _inlineNowPlaying.Visibility = Visibility.Visible;
+            }
+        }
+    }
+
+    private void EnsureInlinePlaybackTimer()
+    {
+        if (_inlinePlaybackTimer is not null) return;
+        _inlinePlaybackTimer = DispatcherQueue.CreateTimer();
+        _inlinePlaybackTimer.Interval = TimeSpan.FromMilliseconds(250);
+        _inlinePlaybackTimer.Tick += (_, _) => UpdateInlinePlaybackPosition();
+    }
+
+    private static string FormatInlineTime(TimeSpan time) =>
+        time.TotalHours >= 1 ? time.ToString(@"hh\:mm\:ss") : time.ToString(@"mm\:ss");
+
+    private void UpdateInlinePlaybackPosition()
+    {
+        if (_inlinePlayer is null || _inlineProgressSlider is null || _inlineTimeLabel is null)
+            return;
+
+        try
+        {
+            var session = _inlinePlayer.PlaybackSession;
+            var duration = session.NaturalDuration;
+            var position = session.Position;
+            var durationSeconds = Math.Max(0, duration.TotalSeconds);
+            _inlineUpdatingProgress = true;
+            _inlineProgressSlider.Maximum = Math.Max(1, durationSeconds);
+            _inlineProgressSlider.IsEnabled = durationSeconds > 0;
+            _inlineProgressSlider.Value = Math.Clamp(position.TotalSeconds, 0, _inlineProgressSlider.Maximum);
+            _inlineTimeLabel.Text = $"{FormatInlineTime(position)} / {FormatInlineTime(duration)}";
+        }
+        catch (Exception error)
+        {
+            Debug.WriteLine($"SPP inline playback progress unavailable: {error}");
+        }
+        finally
+        {
+            _inlineUpdatingProgress = false;
         }
     }
 
     private MediaPlayer CreateInlinePlayer()
     {
         var player = new MediaPlayer();
+        player.MediaOpened += (_, _) => DispatcherQueue.TryEnqueue(UpdateInlinePlaybackPosition);
         player.MediaEnded += (_, _) => DispatcherQueue.TryEnqueue(() =>
         {
+            _inlinePlaybackTimer?.Stop();
+            UpdateInlinePlaybackPosition();
             if (_inlinePlayerButton is not null) _inlinePlayerButton.Content = "播放";
+            if (_inlineNowPlaying is not null)
+                _inlineNowPlaying.Text = "试听完成";
         });
-        player.MediaFailed += (_, _) => DispatcherQueue.TryEnqueue(() =>
+        player.MediaFailed += (_, error) =>
         {
-            if (_inlinePlayerButton is not null) _inlinePlayerButton.Content = "播放失败";
-        });
+            var message = error.ErrorMessage;
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                _inlinePlaybackTimer?.Stop();
+                if (_inlinePlayerButton is not null) _inlinePlayerButton.Content = "播放失败";
+                if (_inlineNowPlaying is not null)
+                    _inlineNowPlaying.Text = $"试听失败：{message}";
+            });
+        };
         return player;
     }
 

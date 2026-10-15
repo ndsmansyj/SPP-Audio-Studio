@@ -2,6 +2,22 @@
 
 This file tracks public, user-facing changes. Internal RC test notes and handoff documents are intentionally kept out of the public project tree.
 
+## 1.0.1 — 2026-10-15
+
+### Windows
+- Fixed the crash when playing completed voice-clone output in the WinUI task/history panel. Audio stays inside the application and supports play/pause and position seeking.
+- Fixed Whisper CUDA 12 cuBLAS dependency lookup in the separate ASR process launched for temporary voice reference transcription. Finds the existing Qwen/Mel PyTorch DLLs automatically; no machine-wide PATH or CUDA Toolkit setup is required when the managed runtime is complete.
+- Improved reference-transcription error messages, UTF-8 subprocess output, and the option to supply spoken reference text manually when ASR is unavailable.
+
+### macOS
+- Added playback for saved and bundled voice templates alongside temporary reference audio.
+- Unified the selected reference audio preview in the “常用人声” toolbar; changing the selected reference stops the previous preview.
+- Retained existing generation, queued tasks, data, model/runtime installations and history.
+
+### Distribution
+- Refreshed the Windows portable archive and the Apple Silicon DMG, preserving user data and model caches during upgrade.
+- Includes the playback Fix 1 and Whisper CUDA Fix 2 that were previously published as Windows previews, plus the macOS build 113 reference-preview changes.
+
 ## 1.0.0 — 2026-09-22
 
 ### Project
