@@ -1,0 +1,37 @@
+name: Playback Fix Windows Preview
+on:
+  push:
+    branches:
+      - fix/audio-playback-winui-macos-20261015
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build-winui:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.425
+      - uses: microsoft/setup-msbuild@v2
+      - name: Build self-contained WinUI3 app
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $project = 'windows/src/SPPAudioStudio.Windows/SPPAudioStudio.Windows.csproj'
+          $dest = Join-Path $env:GITHUB_WORKSPACE 'playback-fix-app'
+          & msbuild $project /nologo /m /restore /t:Publish /p:Configuration=Release /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:WindowsPackageType=None /p:WindowsAppSDKSelfContained=true /p:SelfContained=true /p:PublishTrimmed=false /p:PublishSingleFile=false /p:DebugType=embedded /p:DebugSymbols=false "/p:PublishDir=$dest\\"
+          if ($LASTEXITCODE -ne 0) { throw "MSBuild publish failed: $LASTEXITCODE" }
+          $exe = Join-Path $dest 'SPPAudioStudio.Windows.exe'
+          $xaml = Join-Path $dest 'Microsoft.UI.Xaml.dll'
+          if (-not (Test-Path $exe -PathType Leaf)) { throw "Publish missing exe: $exe" }
+          if (-not (Test-Path $xaml -PathType Leaf)) { throw "Publish missing WinUI runtime: $xaml" }
+          Get-ChildItem $dest -File | Select-Object Name,Length | Format-Table
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SPP-Audio-Studio-WinUI-Playback-Fix-x64
+          path: playback-fix-app/
+          if-no-files-found: error
+          retention-days: 14
