@@ -786,9 +786,8 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
                 previewIsPlaying = false
                 previewStatus = "已暂停"
             } else {
-                player.play()
-                previewIsPlaying = true
-                previewStatus = "正在试听"
+                previewIsPlaying = player.play()
+                previewStatus = previewIsPlaying ? "正在试听" : "试听失败：无法继续播放音频"
             }
             return
         }
@@ -811,6 +810,14 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
             previewIsPlaying = false
             previewStatus = "试听失败：" + error.localizedDescription
         }
+    }
+
+    func stopPreview() {
+        previewPlayer?.stop()
+        previewPlayer = nil
+        previewPath = nil
+        previewIsPlaying = false
+        previewStatus = ""
     }
 
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
@@ -1822,9 +1829,29 @@ struct VoiceCloneView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .appCard(interactive: true)
 
-            if temporaryRef != nil {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("临时参考音的原话").font(AppUI.sectionTitle)
+            if let reference = temporaryRef {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("临时参考音的原话").font(AppUI.sectionTitle)
+                            Text(reference.lastPathComponent)
+                                .font(AppUI.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        Spacer()
+                        Button {
+                            state.togglePreview(reference.path)
+                        } label: {
+                            Label(
+                                state.previewPath == reference.path && state.previewIsPlaying ? "暂停参考音" : "试听参考音",
+                                systemImage: state.previewPath == reference.path && state.previewIsPlaying
+                                    ? "pause.fill" : "play.fill"
+                            )
+                        }
+                        .buttonStyle(.bordered)
+                        .help("试听选中的临时参考音")
+                    }
                     TextField("输入参考音频里说的话", text: $temporaryRefText, axis: .vertical)
                         .lineLimit(2...4)
                         .textFieldStyle(.plain)
@@ -1834,6 +1861,13 @@ struct VoiceCloneView: View {
                     Text("未配置 Whisper 时需填写。这里填写参考音说的话，不是要生成的文案。")
                         .font(AppUI.caption)
                         .foregroundStyle(.secondary)
+                    if state.previewPath == reference.path ||
+                       state.previewStatus.hasPrefix("试听失败") ||
+                       state.previewStatus == "试听文件不存在" {
+                        Text(state.previewStatus)
+                            .font(AppUI.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 
@@ -2016,6 +2050,7 @@ struct VoiceCloneView: View {
         panel.canChooseDirectories = false
         if panel.runModal() == .OK, let url = panel.url,
            isSupportedAudio(url), url.pathExtension.lowercased() != "ncm" {
+            if state.previewPath == temporaryRef?.path { state.stopPreview() }
             temporaryRef = url
             temporaryRefText = ""
             selectedVoice = nil
@@ -2024,6 +2059,7 @@ struct VoiceCloneView: View {
     private func voiceCard(_ voice: VoiceTemplate) -> some View {
         let active = temporaryRef == nil && effectiveVoiceID == voice.id
         return Button {
+            if state.previewPath == temporaryRef?.path { state.stopPreview() }
             temporaryRef = nil
             selectedVoice = voice.id
             if outputMode == "reference" { outputMode = "default" }
