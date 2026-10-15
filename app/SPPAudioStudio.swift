@@ -45,6 +45,7 @@ struct VoiceTemplate: Identifiable, Hashable {
     let note: String
     let isDefault: Bool
     let isBundled: Bool
+    let referenceAudioPath: String?
 }
 
 enum WorkerError: LocalizedError {
@@ -654,14 +655,25 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
             do {
                 let json = try self.runWorkerSync(["voice-list"])
                 let rows = json["templates"] as? [[String: Any]] ?? []
-                let values = rows.map {
-                    VoiceTemplate(
-                        id: $0["id"] as? String ?? UUID().uuidString,
-                        name: $0["name"] as? String ?? "未命名",
-                        referenceText: $0["reference_text"] as? String ?? "",
-                        note: $0["note"] as? String ?? "",
-                        isDefault: $0["default"] as? Bool ?? false,
-                        isBundled: $0["bundled"] as? Bool ?? false
+                let values = rows.map { row -> VoiceTemplate in
+                    // voice-list exposes the folder and reference_audio filename.
+                    // Keep it separate from the display name: the bundled/default
+                    // voice is copied to the same managed Voices folder as user voices.
+                    let referencePath: String? = {
+                        guard let folder = row["folder"] as? String, !folder.isEmpty,
+                              let filename = row["reference_audio"] as? String, !filename.isEmpty,
+                              (filename as NSString).lastPathComponent == filename else { return nil }
+                        return URL(fileURLWithPath: folder, isDirectory: true)
+                            .appendingPathComponent(filename).path
+                    }()
+                    return VoiceTemplate(
+                        id: row["id"] as? String ?? UUID().uuidString,
+                        name: row["name"] as? String ?? "未命名",
+                        referenceText: row["reference_text"] as? String ?? "",
+                        note: row["note"] as? String ?? "",
+                        isDefault: row["default"] as? Bool ?? false,
+                        isBundled: row["bundled"] as? Bool ?? false,
+                        referenceAudioPath: referencePath
                     )
                 }
                 DispatchQueue.main.async { self.voices = values }
@@ -1763,6 +1775,7 @@ struct VoiceCloneView: View {
     @State private var selectedVoice: String?
     @State private var temporaryRef: URL?
     @State private var temporaryRefText = ""
+    @State private var referencePreviewRequestedPath: String?
     @State private var text = "大家好，我是宋盼盼。这是一段 SPP Audio Studio 的声音克隆测试。如果你能自然地听到这句话，说明人声模板、模型和本地推理都已经正常工作。"
     @State private var showAdd = false
     @State private var pendingDeleteVoice: VoiceTemplate?
@@ -1781,7 +1794,61 @@ struct VoiceCloneView: View {
                 Button("＋ 新建人声模板") { showAdd = true }
             }
 
-            Text("常用人声").font(AppUI.sectionTitle)
+            HStack(spacing: 14) {
+                Text("常用人声").font(AppUI.sectionTitle)
+                if let source = selectedReferenceAudio {
+                    HStack(spacing: 8) {
+                        Image(systemName: "waveform")
+                            .foregroundStyle(.secondary)
+                        Text(source.title)
+                            .font(AppUI.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer(minLength: 0)
+                        if FileManager.default.fileExists(atPath: source.path) {
+                            Button {
+                                referencePreviewRequestedPath = source.path
+                                state.togglePreview(source.path)
+                            } label: {
+                                Label(
+                                    state.previewPath == source.path && state.previewIsPlaying ? "暂停" : "试听",
+                                    systemImage: state.previewPath == source.path && state.previewIsPlaying
+                                        ? "pause.fill" : "play.fill"
+                                )
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .help("试听当前参考音：\(source.title)")
+                        } else {
+                            Label("音频缺失", systemImage: "exclamationmark.triangle")
+                                .font(AppUI.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .frame(maxWidth: 360, alignment: .leading)
+                    .background(Color(nsColor: .controlBackgroundColor),
+                                in: RoundedRectangle(cornerRadius: 10))
+                    .overlay(RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(Color(nsColor: .separatorColor)))
+                } else if selectedTemplate != nil {
+                    Text("参考音不可用")
+                        .font(AppUI.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            if let source = selectedReferenceAudio,
+               referencePreviewRequestedPath == source.path,
+               (state.previewStatus.hasPrefix("试听失败") ||
+                state.previewStatus == "试听文件不存在") {
+                Text(state.previewStatus)
+                    .font(AppUI.caption)
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+            }
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 12) {
                     ForEach(state.voices) { voice in
@@ -1829,29 +1896,9 @@ struct VoiceCloneView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .appCard(interactive: true)
 
-            if let reference = temporaryRef {
+            if temporaryRef != nil {
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 12) {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("临时参考音的原话").font(AppUI.sectionTitle)
-                            Text(reference.lastPathComponent)
-                                .font(AppUI.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-                        Spacer()
-                        Button {
-                            state.togglePreview(reference.path)
-                        } label: {
-                            Label(
-                                state.previewPath == reference.path && state.previewIsPlaying ? "暂停参考音" : "试听参考音",
-                                systemImage: state.previewPath == reference.path && state.previewIsPlaying
-                                    ? "pause.fill" : "play.fill"
-                            )
-                        }
-                        .buttonStyle(.bordered)
-                        .help("试听选中的临时参考音")
-                    }
+                    Text("临时参考音的原话").font(AppUI.sectionTitle)
                     TextField("输入参考音频里说的话", text: $temporaryRefText, axis: .vertical)
                         .lineLimit(2...4)
                         .textFieldStyle(.plain)
@@ -1861,13 +1908,6 @@ struct VoiceCloneView: View {
                     Text("未配置 Whisper 时需填写。这里填写参考音说的话，不是要生成的文案。")
                         .font(AppUI.caption)
                         .foregroundStyle(.secondary)
-                    if state.previewPath == reference.path ||
-                       state.previewStatus.hasPrefix("试听失败") ||
-                       state.previewStatus == "试听文件不存在" {
-                        Text(state.previewStatus)
-                            .font(AppUI.caption)
-                            .foregroundStyle(.secondary)
-                    }
                 }
             }
 
@@ -1997,6 +2037,7 @@ struct VoiceCloneView: View {
             presenting: pendingDeleteVoice
         ) { voice in
             Button("删除「\(voice.name)」", role: .destructive) {
+                stopSelectedReferencePreviewIfNeeded()
                 state.deleteVoice(voice.id)
                 if selectedVoice == voice.id { selectedVoice = nil }
                 pendingDeleteVoice = nil
@@ -2021,6 +2062,22 @@ struct VoiceCloneView: View {
     private var selectedTemplate: VoiceTemplate? {
         guard temporaryRef == nil, let id = effectiveVoiceID else { return nil }
         return state.voices.first(where: { $0.id == id })
+    }
+
+    private var selectedReferenceAudio: (title: String, path: String)? {
+        if let reference = temporaryRef {
+            return ("临时 · " + reference.lastPathComponent, reference.path)
+        }
+        guard let template = selectedTemplate,
+              let path = template.referenceAudioPath else { return nil }
+        return (template.name, path)
+    }
+
+    private func stopSelectedReferencePreviewIfNeeded() {
+        if let path = selectedReferenceAudio?.path, state.previewPath == path {
+            state.stopPreview()
+        }
+        referencePreviewRequestedPath = nil
     }
 
     private var effectiveCloneOutputDir: String {
@@ -2050,7 +2107,7 @@ struct VoiceCloneView: View {
         panel.canChooseDirectories = false
         if panel.runModal() == .OK, let url = panel.url,
            isSupportedAudio(url), url.pathExtension.lowercased() != "ncm" {
-            if state.previewPath == temporaryRef?.path { state.stopPreview() }
+            stopSelectedReferencePreviewIfNeeded()
             temporaryRef = url
             temporaryRefText = ""
             selectedVoice = nil
@@ -2059,7 +2116,7 @@ struct VoiceCloneView: View {
     private func voiceCard(_ voice: VoiceTemplate) -> some View {
         let active = temporaryRef == nil && effectiveVoiceID == voice.id
         return Button {
-            if state.previewPath == temporaryRef?.path { state.stopPreview() }
+            stopSelectedReferencePreviewIfNeeded()
             temporaryRef = nil
             selectedVoice = voice.id
             if outputMode == "reference" { outputMode = "default" }
