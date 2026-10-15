@@ -1,7 +1,8 @@
-name: Playback Fix Windows Preview
+name: Windows WinUI build and worker tests
 on:
   push:
     branches:
+      - main
       - fix/audio-playback-winui-macos-20261015
   workflow_dispatch:
 permissions:
@@ -34,6 +35,9 @@ jobs:
           $xaml = Join-Path $dest 'Microsoft.UI.Xaml.dll'
           if (-not (Test-Path $exe -PathType Leaf)) { throw "Publish missing exe: $exe" }
           if (-not (Test-Path $xaml -PathType Leaf)) { throw "Publish missing WinUI runtime: $xaml" }
+          $version = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($exe)
+          Write-Host "WinUI file version: $($version.FileVersion); product version: $($version.ProductVersion)"
+          if (-not $version.FileVersion.StartsWith('1.0.1.')) { throw "Wrong WinUI file version: $($version.FileVersion)" }
           Get-ChildItem $dest -File | Select-Object Name,Length | Format-Table
       - uses: actions/upload-artifact@v4
         with:
