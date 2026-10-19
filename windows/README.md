@@ -166,3 +166,22 @@ python -m unittest windows.tests.test_packaging -v
 ```
 
 The tests parse every PowerShell script, validate the manifests/wrappers, and check release-integrity generation is present.
+
+
+### 模型下载、Runtime 与磁盘空间
+
+Windows Qwen3-TTS 使用约 3.86 GB 的原始权重（与 macOS MLX 8-bit 权重不同），
+另有约 0.68 GB 的 speech tokenizer。模型目录与 Python/PyTorch Runtime 是两种独立存储。
+
+新版下载器按来源保存 .part 断点缓存，避免切换源时把不同主机的响应拼接。
+发现超出预期大小或校验失败时，会重置对应临时文件并尝试其他来源。
+「模型与环境」中可展开模型卡片复制固定版本的下载链接、目录结构、打开目标文件夹。
+已有正确文件可跳过；大型权重通过 SHA-256 校验。
+
+空间说明：CUDA PyTorch 运行环境以及 pip 临时解包会占用大量空间。
+新版把 Runtime 安装暂存、pip 缓存和 TMP/TEMP 安装临时目录放到
+%LOCALAPPDATA%\SPP Audio Studio\Runtime 下面。如果该目录已经通过
+Windows Junction 指向空间充足的另一块磁盘，这些文件也会跟随迁移。
+App 的「模型存储位置」设置只控制模型权重，不改变 Runtime 目录。
+如果 C 盘空间不足，请先安排 Runtime 存储位置，并确认目标盘有足够空间；
+不要直接删除正在使用的 Runtime 或 Windows Python 目录。

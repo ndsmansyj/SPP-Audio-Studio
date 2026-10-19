@@ -2,6 +2,14 @@
 
 This file tracks public, user-facing changes. Internal RC test notes and handoff documents are intentionally kept out of the public project tree.
 
+## Unreleased — Windows installation reliability
+
+- Isolate each model download's resumable partial file by source; detect and recover corrupt/oversized partial downloads with hash verification.
+- Add per-model fixed revision download links and storage-folder actions to Windows.
+- Avoid unintentionally cancelling a running model download when changing its source; defer the new choice until the current download completes.
+- Put Windows Runtime install staging, pip cache and unpack temp paths under Runtime so junction-based Runtime relocations move temporary files off a low-space system drive as well.
+- Add Runtime location controls, low-space warning diagnostic event, and source recovery regression tests.
+
 ## 1.0.1 — 2026-10-15
 
 ### Windows

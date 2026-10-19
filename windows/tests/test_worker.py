@@ -269,15 +269,16 @@ class WorkerTests(unittest.TestCase):
         worker = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(worker)
         target = Path(self.tmp.name) / "model.bin"
-        part = target.with_suffix(".bin.part")
+        part = target.with_suffix(".bin.part.https-hf-mirror-com")
         part.write_bytes(b"12")
         commands = []
         class FakeProcess:
             def __init__(self, cmd):
                 commands.append(cmd)
-                self.returncode = 22 if len(commands) == 1 else 0
-                if len(commands) == 2:
-                    part.write_bytes(b"12345")
+                # Failed range resume -> clean retry -> alternate mirror.
+                self.returncode = 22 if len(commands) <= 2 else 0
+                if len(commands) == 3:
+                    Path(cmd[cmd.index("-o") + 1]).write_bytes(b"12345")
             def poll(self):
                 return self.returncode
         with patch.object(worker.shutil, "which", return_value="C:/tools/curl.exe"), \
@@ -288,11 +289,13 @@ class WorkerTests(unittest.TestCase):
                 model="qwen", completed_before=0, model_total=5,
             )
         self.assertEqual(target.read_bytes(), b"12345")
-        self.assertEqual(len(commands), 2)
+        self.assertEqual(len(commands), 3)
         self.assertEqual(commands[0][0], "C:/tools/curl.exe")
         self.assertIn("-C", commands[0])
+        self.assertNotIn("-C", commands[1])
         self.assertIn("hf-mirror.com", commands[0][-1])
-        self.assertIn("huggingface.co", commands[1][-1])
+        self.assertIn("hf-mirror.com", commands[1][-1])
+        self.assertIn("huggingface.co", commands[2][-1])
 
     def test_download_rejects_wrong_sha256(self):
         import importlib.util
@@ -300,11 +303,10 @@ class WorkerTests(unittest.TestCase):
         worker = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(worker)
         target = Path(self.tmp.name) / "model.bin"
-        part = target.with_suffix(".bin.part")
         payload = b"12345"
         class FakeProcess:
             def __init__(self, cmd):
-                part.write_bytes(payload)
+                Path(cmd[cmd.index("-o") + 1]).write_bytes(payload)
                 self.returncode = 0
             def poll(self):
                 return self.returncode

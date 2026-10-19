@@ -52,6 +52,8 @@ public sealed partial class MainWindow : Window
     private TextBlock? _temporaryReferenceLabel;
     private TextBox? _temporaryReferenceTextBox;
     private CancellationTokenSource? _operationCancellation;
+    private bool _environmentModelDownloadRunning;
+    private string? _pendingDownloadSource;
     private readonly Dictionary<string, TextBlock> _modelStateLabels = [];
     private readonly Dictionary<string, ModelProgressVisual> _modelProgressBars = [];
     private readonly Dictionary<string, TextBlock> _modelProgressLabels = [];
@@ -1427,6 +1429,24 @@ public sealed partial class MainWindow : Window
         buttons.Children.Add(link);
         body.Children.Add(buttons);
 
+        var manual = new Expander { Header = "手动下载 · 地址与存放目录" };
+        var manualBody = new StackPanel { Spacing = 7 };
+        manualBody.Children.Add(new TextBlock
+        {
+            Text = "按原目录层级保存模型与配置文件；单个权重文件不代表模型完整。正确文件会自动跳过，缺失文件可继续由 App 下载。",
+            Foreground = MutedBrush, FontSize = 11, TextWrapping = TextWrapping.Wrap
+        });
+        var manualFirst = new StackPanel { Spacing = 6 };
+        manualFirst.Children.Add(ActionButton("复制主文件地址", () => CopyModelDownloadURLs(key, false, status)));
+        manualFirst.Children.Add(ActionButton("复制全部文件地址", () => CopyModelDownloadURLs(key, true, status)));
+        manualBody.Children.Add(manualFirst);
+        var manualSecond = new StackPanel { Spacing = 6 };
+        manualSecond.Children.Add(ActionButton("打开对应目录", () => OpenModelFolder(key, status)));
+        manualSecond.Children.Add(ActionButton("复制目录路径", () => CopyModelFolder(key, status)));
+        manualBody.Children.Add(manualSecond);
+        manual.Content = manualBody;
+        body.Children.Add(manual);
+
         var progress = new ModelProgressVisual();
         var progressLabel = new TextBlock
         {
@@ -1446,7 +1466,35 @@ public sealed partial class MainWindow : Window
     {
         var body = new StackPanel { Spacing = 12 };
         body.Children.Add(SectionTitle("推理运行环境"));
-        body.Children.Add(new TextBlock { Text = "运行组件安装到 App 数据目录，不修改系统 Python。", Foreground = MutedBrush });
+        body.Children.Add(new TextBlock
+        {
+            Text = "CUDA / PyTorch 运行环境体积较大。现在安装时的暂存与 pip 缓存均放在 Runtime 目录内；如通过 Windows 目录联接将 Runtime 指向 D 盘，临时文件也会留在 D 盘。模型存储位置设置不影响 Runtime。",
+            Foreground = MutedBrush, FontSize = 12, TextWrapping = TextWrapping.Wrap
+        });
+        var runtimeControls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 9 };
+        runtimeControls.Children.Add(ActionButton("打开 Runtime 目录", () =>
+        {
+            try
+            {
+                var path = RuntimeDirectoryPath();
+                System.IO.Directory.CreateDirectory(path);
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "explorer.exe", Arguments = "\"" + path + "\"",
+                    UseShellExecute = true
+                });
+            }
+            catch (Exception error) { status.Text = "打开 Runtime 目录失败：" + error.Message; }
+        }));
+        runtimeControls.Children.Add(ActionButton("复制 Runtime 路径", () =>
+        {
+            var package = new DataPackage();
+            package.SetText(RuntimeDirectoryPath());
+            Clipboard.SetContent(package);
+            Clipboard.Flush();
+            status.Text = "已复制 Runtime 目录路径";
+        }));
+        body.Children.Add(runtimeControls);
         body.Children.Add(RuntimeRow("Qwen Runtime", "qwen_python", status));
         body.Children.Add(RuntimeRow("Mel Separator", "separator", status));
         body.Children.Add(RuntimeRow("Whisper ASR（可选）", "asr_python", status));
@@ -1594,37 +1642,152 @@ public sealed partial class MainWindow : Window
         _ = dialog.ShowAsync();
     }
 
+    private static string RuntimeDirectoryPath() => IOPath.Combine(
+        System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
+        "SPP Audio Studio", "Runtime");
+
+    private static string ModelFolderName(string key) => key switch
+    {
+        "qwen" => "Qwen3-TTS-12Hz-1.7B-Base",
+        "mel" => "Mel-Deux",
+        _ => "whisper-turbo"
+    };
+
+    private string ModelFolderPath(string key) => IOPath.Combine(
+        string.IsNullOrWhiteSpace(_modelRootPath)
+            ? IOPath.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
+                "SPP Audio Studio", "Models")
+            : _modelRootPath,
+        ModelFolderName(key));
+
+    private void CopyModelFolder(string key, TextBlock status)
+    {
+        var package = new DataPackage();
+        package.SetText(ModelFolderPath(key));
+        Clipboard.SetContent(package);
+        Clipboard.Flush();
+        status.Text = "已复制模型目录路径";
+    }
+
+    private void OpenModelFolder(string key, TextBlock status)
+    {
+        try
+        {
+            var path = ModelFolderPath(key);
+            System.IO.Directory.CreateDirectory(path);
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "explorer.exe", Arguments = "\"" + path + "\"",
+                UseShellExecute = true
+            });
+        }
+        catch (Exception error) { status.Text = "打开模型目录失败：" + error.Message; }
+    }
+
+    private void CopyModelDownloadURLs(string key, bool all, TextBlock status)
+    {
+        string repo, revision;
+        string[] paths;
+        switch (key)
+        {
+            case "qwen":
+                repo = "Qwen/Qwen3-TTS-12Hz-1.7B-Base";
+                revision = "fd4b254389122332181a7c3db7f27e918eec64e3";
+                paths = [
+                    "model.safetensors", "config.json", "generation_config.json",
+                    "merges.txt", "preprocessor_config.json",
+                    "speech_tokenizer/config.json",
+                    "speech_tokenizer/configuration.json",
+                    "speech_tokenizer/model.safetensors",
+                    "speech_tokenizer/preprocessor_config.json",
+                    "tokenizer_config.json", "vocab.json"
+                ];
+                break;
+            case "mel":
+                repo = "becruily/mel-band-roformer-deux";
+                revision = "2da74427d682a3df47a774378fc24d7a1a0cdaad";
+                paths = ["becruily_deux.ckpt", "config_deux_becruily.yaml"];
+                break;
+            default:
+                repo = "mobiuslabsgmbh/faster-whisper-large-v3-turbo";
+                revision = "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf";
+                paths = [
+                    "model.bin", "config.json", "preprocessor_config.json",
+                    "tokenizer.json", "vocabulary.json"
+                ];
+                break;
+        }
+        var selected = all ? paths : paths.Take(1);
+        var links = string.Join("\n\n", selected.Select(file =>
+        {
+            var url = $"https://huggingface.co/{repo}/resolve/{revision}/{file}?download=true";
+            return all ? $"{file}\n{url}" : url;
+        }));
+        var package = new DataPackage();
+        package.SetText(links);
+        Clipboard.SetContent(package);
+        Clipboard.Flush();
+        status.Text = all ? "已复制全套固定版本模型地址（请保留子目录结构）" : "已复制主文件固定版本下载地址";
+    }
+
     private async Task SetDownloadSourceAsync(string source, TextBlock status)
     {
         _downloadSource = source;
+        if (_environmentModelDownloadRunning)
+        {
+            _pendingDownloadSource = source;
+            status.Text = "已设置下次下载使用的新来源；当前下载不会被中断。";
+            return;
+        }
         await RunEnvironmentCommandAsync("download-source", [source], status, false);
     }
 
-    private async Task RunEnvironmentCommandAsync(string command, IReadOnlyList<string> arguments, TextBlock status, bool refreshEnvironment = true)
+    private async Task<bool> RunEnvironmentCommandAsync(string command, IReadOnlyList<string> arguments, TextBlock status, bool refreshEnvironment = true)
     {
+        if (_environmentModelDownloadRunning)
+        {
+            status.Text = "有模型正在下载。要切换任务，请先点击「取消当前操作」。";
+            return false;
+        }
+        var modelDownloading = command == "model-download";
+        if (modelDownloading) _environmentModelDownloadRunning = true;
         _operationCancellation?.Cancel();
-        _operationCancellation = new CancellationTokenSource();
+        var cancellation = new CancellationTokenSource();
+        _operationCancellation = cancellation;
         status.Text = $"正在执行 {command}…";
         var modelKey = command == "model-download" && arguments.Count > 0 ? arguments[0] : null;
         try
         {
-            var json = await RunWorkerAsync(command, arguments, _operationCancellation.Token);
+            var json = await RunWorkerAsync(command, arguments, cancellation.Token);
             status.Text = PrettyJson(json);
             await RefreshWorkerStatusAsync();
             if (refreshEnvironment) await RefreshEnvironmentAsync(status);
+            return true;
         }
         catch (OperationCanceledException)
         {
             status.Text = "已取消";
             if (modelKey is not null) SetModelProgressFailed(modelKey, "已取消");
+            return false;
         }
         catch (Exception error)
         {
             status.Text = error.Message;
-            if (modelKey is not null) SetModelProgressFailed(modelKey, "下载失败");
+            if (modelKey is not null) SetModelProgressFailed(modelKey, "下载失败：" + error.Message);
+            return false;
         }
         finally
         {
+            if (modelDownloading) _environmentModelDownloadRunning = false;
+            if (modelDownloading && _pendingDownloadSource is not null)
+            {
+                var pending = _pendingDownloadSource;
+                _pendingDownloadSource = null;
+                try { await _worker.ExecuteAsync(new WorkerCommand("download-source", [pending])); }
+                catch (Exception error) { status.Text += "；下载源保存失败：" + error.Message; }
+            }
+            if (ReferenceEquals(_operationCancellation, cancellation)) _operationCancellation = null;
+            cancellation.Dispose();
             if (modelKey is not null && _modelDownloadButtons.TryGetValue(modelKey, out var button))
                 button.IsEnabled = true;
         }
@@ -1637,8 +1800,11 @@ public sealed partial class MainWindow : Window
             ("runtime-install", "mel"), ("model-download", "mel"),
             ("runtime-install", "asr"), ("model-download", "whisper") })
         {
-            await RunEnvironmentCommandAsync(command, [component, "--source", _downloadSource], status, false);
-            if (_operationCancellation?.IsCancellationRequested == true) break;
+            if (!await RunEnvironmentCommandAsync(command, [component, "--source", _downloadSource], status, false))
+            {
+                status.Text = $"安装在 {component} 步骤中断或失败：{status.Text}";
+                break;
+            }
         }
         await RefreshEnvironmentAsync(status);
     }
