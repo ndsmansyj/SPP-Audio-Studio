@@ -21,21 +21,32 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11.9'
-      - name: Bootstrap build dependencies
+      - uses: microsoft/setup-msbuild@v2
+      - name: Run Windows Worker Regression Tests
         shell: pwsh
-        run: ./windows/bootstrap.ps1
-      - name: Test Windows worker and WinUI build
+        run: python -m unittest discover -s windows/tests -p 'test*.py' -v
+      - name: Build self-contained Windows WinUI app
         shell: pwsh
-        run: ./windows/build.ps1 -Configuration Release -Platform x64
-      - name: Build portable Windows preview
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $project = 'windows/src/SPPAudioStudio.Windows/SPPAudioStudio.Windows.csproj'
+          $dest = Join-Path $env:GITHUB_WORKSPACE 'winui-recovery-preview'
+          & msbuild $project /nologo /m /restore /t:Publish /p:Configuration=Release /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:WindowsPackageType=None /p:WindowsAppSDKSelfContained=true /p:SelfContained=true /p:PublishTrimmed=false /p:PublishSingleFile=false /p:DebugType=embedded /p:DebugSymbols=false "/p:PublishDir=$dest\"
+          if ($LASTEXITCODE -ne 0) { throw "WinUI preview MSBuild failed: $LASTEXITCODE" }
+          $exe = Join-Path $dest 'SPPAudioStudio.Windows.exe'
+          $xaml = Join-Path $dest 'Microsoft.UI.Xaml.dll'
+          if (-not (Test-Path $exe -PathType Leaf)) { throw "Build output missing exe: $exe" }
+          if (-not (Test-Path $xaml -PathType Leaf)) { throw "Build output missing XAML runtime: $xaml" }
+      - name: Bundle test evidence
         shell: pwsh
-        run: ./windows/publish.ps1 -Platform x64 -Version "1.0.2-preview"
+        run: |
+          New-Item -ItemType Directory -Force 'winui-recovery-preview/worker-source' | Out-Null
+          Copy-Item 'windows/worker/spp_worker.py' 'winui-recovery-preview/worker-source/spp_worker.py'
+          "PREVIEW ONLY: source worker is not a frozen portable worker. Do not distribute as an install package." | Set-Content 'winui-recovery-preview/PREVIEW-README.txt'
       - name: Upload Windows preview
         uses: actions/upload-artifact@v4
         with:
-          name: SPP-Audio-Studio-Windows-1.0.2-model-recovery
-          path: |
-            windows/artifacts/packages/*.zip
-            windows/artifacts/packages/*.sha256
+          name: SPP-Audio-Studio-Windows-model-recovery-WinUI-test-build
+          path: winui-recovery-preview/
           if-no-files-found: error
           retention-days: 14
