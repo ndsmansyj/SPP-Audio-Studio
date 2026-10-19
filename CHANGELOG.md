@@ -2,12 +2,14 @@
 
 This file tracks public, user-facing changes. Internal RC test notes and handoff documents are intentionally kept out of the public project tree.
 
-## Unreleased — macOS Qwen download reliability fix
+## 1.0.2 — 2026-10-19 (macOS only)
 
 - Recover valid completed `.part` model files, discard oversized/corrupt partials before retrying, and restart a failed resumed transfer once from zero.
 - Allow Qwen to fall back from ModelScope to revision-pinned Hugging Face sources without bypassing size or SHA-256 verification; respect the selected download source order.
 - Add per-model manual download links (single main weight or full set) and Finder destination controls in the macOS UI.
 - Add regression tests for corrupt/oversized partials, interrupted transfers, valid-file reuse, and source fallback.
+
+Windows 在此版本未改变，继续使用 v1.0.1 安装包。
 
 ## 1.0.1 — 2026-10-15
 
