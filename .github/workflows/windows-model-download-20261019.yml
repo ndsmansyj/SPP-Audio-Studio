@@ -1,0 +1,41 @@
+name: Windows Model Download Recovery Preview
+
+on:
+  push:
+    branches:
+      - fix/windows-model-download-recovery-20261019
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.425
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11.9'
+      - name: Bootstrap build dependencies
+        shell: pwsh
+        run: ./windows/bootstrap.ps1
+      - name: Test Windows worker and WinUI build
+        shell: pwsh
+        run: ./windows/build.ps1 -Configuration Release -Platform x64
+      - name: Build portable Windows preview
+        shell: pwsh
+        run: ./windows/publish.ps1 -Platform x64 -Version "1.0.2-preview"
+      - name: Upload Windows preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: SPP-Audio-Studio-Windows-1.0.2-model-recovery
+          path: |
+            windows/artifacts/packages/*.zip
+            windows/artifacts/packages/*.sha256
+          if-no-files-found: error
+          retention-days: 14
