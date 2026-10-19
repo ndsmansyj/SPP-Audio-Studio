@@ -10,7 +10,7 @@ Windows · macOS
 
 格式转换 · 人声分离 · 声音克隆
 
-**Stable · v1.0.1**
+**macOS · v1.0.2  |  Windows · v1.0.1**
 
 [下载最新版本](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/latest)
 
@@ -22,14 +22,14 @@ SPP Audio Studio 把常用的本地音频处理集中到一个简单的桌面应
 
 ## 下载
 
-前往 **[Latest Release](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/latest)** 下载对应平台版本。
+macOS 请下载 **[v1.0.2](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/tag/v1.0.2)**；Windows 目前仍使用 **[v1.0.1](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/tag/v1.0.1)**。不要把 macOS 的 8-bit MLX 模型复制到 Windows 使用。
 
 | 平台 | 安装包 | 运行要求 |
 | --- | --- | --- |
-| **Windows** | `SPPAudioStudio-1.0.1-win-x64.zip` | Windows 10 / 11 x64；AI 功能推荐 NVIDIA GPU |
-| **macOS** | `SPP-Audio-Studio-1.0.1.dmg` | Apple Silicon · macOS 14+ |
+| **Windows 1.0.1** | [SPPAudioStudio-1.0.1-win-x64.zip](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/download/v1.0.1/SPPAudioStudio-1.0.1-win-x64.zip) | Windows 10 / 11 x64；AI 功能推荐 NVIDIA GPU |
+| **macOS 1.0.2** | [SPP-Audio-Studio-1.0.2.dmg](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/download/v1.0.2/SPP-Audio-Studio-1.0.2.dmg) | Apple Silicon · macOS 14+ |
 
-Release 页面同时列出对应安装包的 SHA-256 校验值。
+对应的 Release 页面提供安装包与 SHA-256 校验文件。Windows 1.0.2 修复仍在单独验证中，暂不发布。
 
 > 从旧版更新：Windows 解压到新文件夹运行 `SPP Audio Studio.exe`，macOS 拖动 `.app` 覆盖旧版。已有模型、缓存、模板、历史数据在用户数据目录中保留，不需要重新下载。
 
@@ -66,7 +66,9 @@ macOS 版面向 Apple Silicon，当前要求 macOS 14+。
 
 普通用户不需要额外安装 Xcode、Command Line Tools、Homebrew 或系统 Python。首次使用 AI 功能时，在「模型与环境」页面完成所需组件安装即可。
 
-macOS 版的 Qwen3-TTS 模型固定从 ModelScope 下载；Mel-Deux、Whisper 与运行环境仍可在应用内选择镜像 / 官方下载源。
+macOS 版 Qwen3-TTS 默认先从 ModelScope 下载，失败后自动切换到 Hugging Face 镜像与官方固定版本；也可手动设置官方优先或镜像优先。所有来源下载的模型均必须通过固定大小和 SHA-256 校验。
+
+在「模型与环境」中展开模型卡片的「手动下载与存放位置」，可复制主权重或全部文件的固定版本下载地址、打开 App 自己的模型目录，并复制目录路径。手动下载时要保留模型目录层级（尤其是 `speech_tokenizer/`）；已有的有效文件可以由 App 校验并跳过，只补下载缺少的文件。下载中断时会保留可续传的较小临时文件，自动清理异常大小的缓存。
 
 如果 macOS 提示“无法验证开发者”，可前往 **系统设置 → 隐私与安全性 → 仍要打开**。
 

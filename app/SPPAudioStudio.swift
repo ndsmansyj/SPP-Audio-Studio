@@ -532,9 +532,7 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
         let source = downloadSource
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let command = kind == "qwen"
-                    ? ["model-download", kind]
-                    : ["model-download", kind, "--source", source]
+                let command = ["model-download", kind, "--source", source]
                 _ = try self.runWorkerSync(command)
                 DispatchQueue.main.async {
                     self.modelBusy = nil
@@ -612,11 +610,7 @@ final class AppState: NSObject, ObservableObject, AVAudioPlayerDelegate {
                 do {
                     let command = type == "runtime" ? "runtime-install" : "model-download"
                     let arguments: [String]
-                    if type == "model" && kind == "qwen" {
-                        arguments = [command, kind]
-                    } else {
-                        arguments = [command, kind, "--source", source]
-                    }
+                    arguments = [command, kind, "--source", source]
                     _ = try self.runWorkerSync(arguments)
                 } catch {
                     let message = self.logger.sanitize(error.localizedDescription)
@@ -2293,7 +2287,7 @@ struct EnvironmentView: View {
                         .pickerStyle(.menu)
                         .frame(width: 230)
 
-                        Text("Mel / Whisper / 运行环境 · Qwen 固定 ModelScope")
+                        Text("Qwen 自动选 ModelScope，失败后回退至固定版本镜像／官方源")
                             .font(AppUI.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -2303,7 +2297,7 @@ struct EnvironmentView: View {
                     modelCard(
                         kind: "qwen",
                         title: "Qwen3-TTS 1.7B 8bit",
-                        subtitle: "声音克隆 · MLX · ModelScope",
+                        subtitle: "声音克隆 · MLX · 多源校验下载",
                         size: "约 3.1 GB",
                         license: "Apache-2.0",
                         installed: state.qwenInstalled,
@@ -2388,7 +2382,7 @@ struct EnvironmentView: View {
                     .padding(.top, 10)
                 }
 
-                Text("说明：模型下载到 App 自己的 Models 目录；“链接本地”只记录路径，不复制、不移动原模型。下载失败时会按所选策略自动切换镜像 / 官方源。")
+                Text("说明：模型下载到 App 自己的 Models 目录；可在模型卡片展开手动下载说明。只接受符合固定大小与 SHA-256 的文件；“链接本地”仅记录路径，不移动原模型。")
                     .font(AppUI.caption)
                     .foregroundStyle(.secondary)
             }
@@ -2446,6 +2440,27 @@ struct EnvironmentView: View {
                 Button("链接本地…") { chooseModelFolder(kind: kind) }
                     .disabled(state.modelBusy != nil || state.batchBusy)
             }
+
+            DisclosureGroup("手动下载与存放位置") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("下载完整模型时需保留全部配置文件及子目录；只放 model.safetensors 不足以完成安装。已经下载的正确文件会被自动校验并跳过，缺少的文件可再点上方下载补齐。")
+                        .font(AppUI.caption)
+                        .foregroundStyle(.secondary)
+                    Text(managedModelFolder(kind).path)
+                        .font(.caption2.monospaced())
+                        .textSelection(.enabled)
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 145), spacing: 8)], spacing: 8) {
+                        Button("复制主文件地址") { copyModelURLs(kind: kind, all: false) }
+                        Button("复制全部文件地址") { copyModelURLs(kind: kind, all: true) }
+                        Button("打开存放目录") { openManagedModelFolder(kind) }
+                        Button("复制目录路径") { copyText(managedModelFolder(kind).path) }
+                    }
+                    .font(AppUI.caption)
+                    .buttonStyle(.bordered)
+                }
+                .padding(.top, 6)
+            }
+            .font(AppUI.caption)
 
             if state.modelBusy == kind {
                 HStack(spacing: 8) {
@@ -2566,6 +2581,63 @@ struct EnvironmentView: View {
         case "managed": return "App 管理"
         case "legacy": return "自动发现本机"
         default: return "未配置"
+        }
+    }
+
+    private func managedModelFolder(_ kind: String) -> URL {
+        let models = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/SPP Audio Studio/Models", isDirectory: true)
+        let folder = kind == "qwen" ? "Qwen3-TTS-12Hz-1.7B-Base-8bit"
+                   : (kind == "mel" ? "Mel-Deux" : "whisper-turbo")
+        return models.appendingPathComponent(folder, isDirectory: true)
+    }
+
+    private func copyText(_ value: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
+        state.modelStatusMessage = "已复制到剪贴板"
+    }
+
+    private func copyModelURLs(kind: String, all: Bool) {
+        let repo: String
+        let revision: String
+        let paths: [String]
+        switch kind {
+        case "qwen":
+            repo = "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit"
+            revision = "e7dd0585652209fa0d7783659aad4e8a324de11c"
+            paths = [
+                "model.safetensors", "config.json", "generation_config.json",
+                "merges.txt", "model.safetensors.index.json",
+                "preprocessor_config.json", "speech_tokenizer/config.json",
+                "speech_tokenizer/configuration.json", "speech_tokenizer/model.safetensors",
+                "speech_tokenizer/preprocessor_config.json", "tokenizer_config.json",
+                "vocab.json"
+            ]
+        case "mel":
+            repo = "becruily/mel-band-roformer-deux"
+            revision = "2da74427d682a3df47a774378fc24d7a1a0cdaad"
+            paths = ["becruily_deux.ckpt", "config_deux_becruily.yaml"]
+        default:
+            repo = "mlx-community/whisper-large-v3-turbo"
+            revision = "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb"
+            paths = ["weights.safetensors", "config.json"]
+        }
+        let selected = all ? paths : Array(paths.prefix(1))
+        let text = selected.map { relative in
+            let url = "https://huggingface.co/\(repo)/resolve/\(revision)/\(relative)?download=true"
+            return all ? "\(relative)\n\(url)" : url
+        }.joined(separator: "\n\n")
+        copyText(text)
+    }
+
+    private func openManagedModelFolder(_ kind: String) {
+        let folder = managedModelFolder(kind)
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            NSWorkspace.shared.open(folder)
+        } catch {
+            state.modelStatusMessage = "打开模型目录失败：\(error.localizedDescription)"
         }
     }
 
