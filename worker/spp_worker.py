@@ -926,6 +926,19 @@ def _endpoint_order(source: str) -> list[str]:
     return [HF_MIRROR, HF_OFFICIAL]
 
 
+def _model_endpoint_order(model: str, source: str) -> list[str]:
+    # Prefer revision-pinned Hugging Face URLs when explicitly requested.
+    # ModelScope serves master rather than the pinned Hugging Face revision,
+    # so it is only accepted after the existing per-file SHA-256 verification.
+    if model != "qwen":
+        return _endpoint_order(source)
+    if source == "official":
+        return [HF_OFFICIAL, HF_MIRROR, MODELSCOPE_ENDPOINT]
+    if source == "mirror":
+        return [HF_MIRROR, HF_OFFICIAL, MODELSCOPE_ENDPOINT]
+    return [MODELSCOPE_ENDPOINT, HF_MIRROR, HF_OFFICIAL]
+
+
 def _model_download_url(endpoint: str, repo: str, revision: str, relpath: str) -> str:
     if endpoint == MODELSCOPE_ENDPOINT:
         # ModelScope does not accept the Hugging Face commit SHA for this mirror.
@@ -966,32 +979,74 @@ def _download_one(
         endpoint_tag = re.sub(r"[^A-Za-z0-9]+", "-", endpoint).strip("-")[-48:] or "source"
         part = target.with_suffix(target.suffix + f".part.{endpoint_tag}")
         url = _model_download_url(endpoint, repo, revision, relpath)
-        print(json.dumps({
-            "event": "download_start", "file": relpath,
-            "endpoint": endpoint, "expected_bytes": expected_size
-        }, ensure_ascii=False), flush=True)
-        cmd = [
-            "/usr/bin/curl", "-L", "--fail", "--silent", "--show-error", "--retry", "3",
-            "--retry-delay", "2", "--connect-timeout", "15",
-            "-C", "-", "-o", str(part), url,
-        ]
-        proc = subprocess.run(cmd)
-        if proc.returncode == 0 and part.is_file() and part.stat().st_size == expected_size:
-            actual_sha256 = sha256_file(part)
-            if actual_sha256 == expected_sha256:
+        # A corrupt / oversized .part must never be passed to curl -C -.
+        # curl may return 0 for a previously completed ranged response even
+        # though the local file is larger than the actual remote model.
+        if part.is_file() and part.stat().st_size == expected_size:
+            # It may already be fully downloaded, e.g. a prior app exit
+            # interrupted validation. Recover only if the hash matches.
+            cached_sha = sha256_file(part)
+            if cached_sha == expected_sha256:
                 part.replace(target)
                 print(json.dumps({
                     "event": "download_done", "file": relpath,
-                    "bytes": expected_size, "sha256": actual_sha256, "endpoint": endpoint
+                    "bytes": expected_size, "sha256": cached_sha,
+                    "endpoint": endpoint, "recovered_partial": True,
                 }, ensure_ascii=False), flush=True)
                 return
-            errors.append(f"{endpoint}: checksum={actual_sha256}")
-            try:
+        if part.is_file() and part.stat().st_size >= expected_size:
+            print(json.dumps({
+                "event": "download_reset", "file": relpath, "endpoint": endpoint,
+                "reason": "invalid_partial_size", "actual_bytes": part.stat().st_size,
+                "expected_bytes": expected_size,
+            }, ensure_ascii=False), flush=True)
+            part.unlink()
+
+        for attempt in range(2):
+            resumed = part.is_file() and part.stat().st_size > 0
+            print(json.dumps({
+                "event": "download_start", "file": relpath, "endpoint": endpoint,
+                "expected_bytes": expected_size, "resumed": resumed,
+                "attempt": attempt + 1,
+            }, ensure_ascii=False), flush=True)
+            cmd = [
+                "/usr/bin/curl", "-L", "--fail", "--silent", "--show-error",
+                "--retry", "3", "--retry-delay", "2", "--connect-timeout", "15",
+            ]
+            if resumed:
+                cmd += ["-C", "-"]
+            cmd += ["-o", str(part), url]
+            proc = subprocess.run(cmd)
+            actual_size = part.stat().st_size if part.is_file() else 0
+            checksum = None
+            if proc.returncode == 0 and actual_size == expected_size:
+                checksum = sha256_file(part)
+                if checksum == expected_sha256:
+                    part.replace(target)
+                    print(json.dumps({
+                        "event": "download_done", "file": relpath,
+                        "bytes": expected_size, "sha256": checksum, "endpoint": endpoint
+                    }, ensure_ascii=False), flush=True)
+                    return
+
+            reason = (f"checksum={checksum}" if checksum is not None
+                      else f"curl={proc.returncode}, size={actual_size}, expected={expected_size}")
+            # A failed resume can contain a bad range response or stale bytes;
+            # retry exactly once from zero, never endlessly append invalid data.
+            if resumed and attempt == 0:
+                print(json.dumps({
+                    "event": "download_reset", "file": relpath,
+                    "endpoint": endpoint, "reason": reason
+                }, ensure_ascii=False), flush=True)
+                if part.exists():
+                    part.unlink()
+                continue
+            errors.append(f"{endpoint}: {reason}")
+            # Preserve a smaller partial download after transient network
+            # failure. Any size/hash-invalid completed download is discarded.
+            if part.exists() and (proc.returncode == 0 or actual_size >= expected_size):
                 part.unlink()
-            except OSError:
-                pass
-            continue
-        errors.append(f"{endpoint}: curl={proc.returncode}, size={part.stat().st_size if part.exists() else 0}")
+            break
     raise RuntimeError(f"下载失败 {relpath}: " + " | ".join(errors))
 
 
@@ -1003,8 +1058,7 @@ def cmd_model_download(args: argparse.Namespace) -> int:
     if args.model == "qwen":
         repo, revision, files, hashes = QWEN_REPO, QWEN_REVISION, QWEN_FILES, QWEN_SHA256
         target_dir = MODEL_DIR / "Qwen3-TTS-12Hz-1.7B-Base-8bit"
-        source = "modelscope"
-        endpoint_order = [MODELSCOPE_ENDPOINT]
+        endpoint_order = _model_endpoint_order("qwen", source)
     elif args.model == "whisper":
         repo, revision, files, hashes = WHISPER_REPO, WHISPER_REVISION, WHISPER_FILES, WHISPER_SHA256
         target_dir = MODEL_DIR / "whisper-turbo"
@@ -1016,7 +1070,8 @@ def cmd_model_download(args: argparse.Namespace) -> int:
         total = sum(files.values())
         print(json.dumps({
             "event": "model_begin", "model": args.model,
-            "repo": repo, "total_bytes": total, "source": source
+            "repo": repo, "total_bytes": total, "source": source,
+            "sources": endpoint_order or _endpoint_order(source)
         }, ensure_ascii=False), flush=True)
         for relpath, size in files.items():
             _download_one(
