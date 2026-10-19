@@ -2449,7 +2449,7 @@ struct EnvironmentView: View {
                     Text(managedModelFolder(kind).path)
                         .font(.caption2.monospaced())
                         .textSelection(.enabled)
-                    HStack(spacing: 8) {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 145), spacing: 8)], spacing: 8) {
                         Button("复制主文件地址") { copyModelURLs(kind: kind, all: false) }
                         Button("复制全部文件地址") { copyModelURLs(kind: kind, all: true) }
                         Button("打开存放目录") { openManagedModelFolder(kind) }
