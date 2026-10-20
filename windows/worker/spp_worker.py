@@ -641,6 +641,8 @@ def cmd_model_status(_: argparse.Namespace) -> int:
         "download_source": env["download_source"],
         "model_storage": load_settings().get("model_storage", "appdata"),
         "model_root": str(MODEL_DIR),
+        "runtime_root": str(RUNTIME_DIR),
+        "runtime_free_bytes": shutil.disk_usage(RUNTIME_DIR).free,
         "python_core": {
             "path": str(PYTHON_CORE),
             "installed": PYTHON_CORE.is_file() and os.access(PYTHON_CORE, os.X_OK),
@@ -939,6 +941,17 @@ def _runtime_installed(kind: str) -> bool:
     return _marker_exists(MEL_RUNTIME_DIR) and (MEL_SITE / "audio_separator").exists() and (MEL_SITE / "onnxruntime").exists() and _mel_registry_ready(MEL_SITE)
 
 
+def _runtime_install_storage() -> tuple[Path, Path]:
+    # Putting staging AND pip cache below RUNTIME_DIR matters when it is a
+    # Windows junction to another drive. Otherwise %LOCALAPPDATA%/Cache,
+    # pip wheels and temp unpacking can still exhaust C: despite the junction.
+    staging = RUNTIME_DIR / ".spp-install-staging"
+    pip_cache = RUNTIME_DIR / ".spp-pip-cache"
+    staging.mkdir(parents=True, exist_ok=True)
+    pip_cache.mkdir(parents=True, exist_ok=True)
+    return staging, pip_cache
+
+
 def cmd_runtime_install(args: argparse.Namespace) -> int:
     ensure_dirs()
     kind = args.runtime
@@ -964,12 +977,23 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
 
     final_dir = {"qwen": QWEN_RUNTIME_DIR, "mel": MEL_RUNTIME_DIR, "asr": ASR_RUNTIME_DIR}[kind]
     errors: list[str] = []
+    staging_root, pip_cache = _runtime_install_storage()
+    available = shutil.disk_usage(staging_root).free
+    if kind in ("qwen", "mel") and available < 10 * 1024**3:
+        print(json.dumps({
+            "event": "runtime_space_warning", "runtime": kind,
+            "free_bytes": available, "staging_root": str(staging_root),
+            "message": "运行环境与 CUDA 包可能需要约 10GB 以上可用空间。"
+                       "当前空间偏少，请检查 Runtime 及临时缓存所在盘。",
+        }, ensure_ascii=False), flush=True)
     endpoint_order = _resolve_pypi_endpoint_order(source, kind)
     torch_order = _resolve_pytorch_endpoint_order(source, kind) if kind in ("qwen", "mel") else [None]
     attempts = [(endpoint, torch_endpoint) for endpoint in endpoint_order for torch_endpoint in torch_order]
 
     for endpoint, torch_endpoint in attempts:
-        temp_dir = Path(tempfile.mkdtemp(prefix=f"runtime-{kind}-", dir=CACHE_DIR))
+        temp_dir = Path(tempfile.mkdtemp(prefix=f"runtime-{kind}-", dir=staging_root))
+        temp_work = temp_dir / "temp"
+        temp_work.mkdir(parents=True, exist_ok=True)
         site = temp_dir / "site-packages"
         site.mkdir(parents=True, exist_ok=True)
 
@@ -998,7 +1022,10 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
             cmd += step_packages
 
             proc = run_capture(cmd, {
-                "PIP_CACHE_DIR": str(CACHE_DIR / "pip"),
+                "PIP_CACHE_DIR": str(pip_cache),
+                "TMP": str(temp_work),
+                "TEMP": str(temp_work),
+                "TMPDIR": str(temp_work),
                 "PIP_DISABLE_PIP_VERSION_CHECK": "1",
                 "PYTHONNOUSERSITE": "1",
             })
@@ -1049,6 +1076,8 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
             shutil.copy2(ffmpeg_path, ffmpeg_target)
             ffmpeg_target.chmod(0o755)
 
+        # Remove unpack scratch before moving staged files into final runtime.
+        shutil.rmtree(temp_work, ignore_errors=True)
         marker = {
             "runtime": kind,
             "installed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -1063,7 +1092,7 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
         )
 
         if final_dir.exists():
-            backup = CACHE_DIR / f"{kind}-runtime-previous-{int(time.time())}"
+            backup = RUNTIME_DIR / f".{kind}-runtime-previous-{int(time.time())}"
             shutil.move(str(final_dir), str(backup))
         shutil.move(str(temp_dir), str(final_dir))
 
@@ -1136,7 +1165,9 @@ def _probe_hf_endpoint(curl: str, endpoint: str, repo: str, revision: str, relpa
 
 def _resolve_model_endpoint_order(source: str, repo: str, revision: str, files: dict, model: str) -> list[str]:
     if source != "auto":
-        return _endpoint_order(source)
+        # Keep ModelScope available as a SHA256-gated Qwen fallback.
+        order = _endpoint_order(source)
+        return order + [MODELSCOPE_ENDPOINT] if repo == QWEN_REPO else order
 
     curl = shutil.which("curl")
     if not curl:
@@ -1238,43 +1269,84 @@ def _download_one(
         emit_progress(expected_size)
         return expected_size
 
-    part = target.with_suffix(target.suffix + ".part")
+    # Older builds shared one .part across hosts; never resume it on
+    # another host. A complete verified legacy .part can be adopted safely.
+    legacy_part = target.with_suffix(target.suffix + ".part")
+    if legacy_part.is_file() and legacy_part.stat().st_size == expected_size:
+        if expected_sha256 is None or _file_sha256(legacy_part) == expected_sha256:
+            legacy_part.replace(target)
+            emit_progress(expected_size)
+            return expected_size
+
     errors = []
     for endpoint in (endpoint_order or _endpoint_order(source)):
+        endpoint_tag = re.sub(r"[^A-Za-z0-9]+", "-", endpoint).strip("-")[-48:] or "source"
+        part = target.with_suffix(target.suffix + f".part.{endpoint_tag}")
         url = _model_download_url(endpoint, repo, revision, relpath)
-        print(json.dumps({
-            "event": "download_start", "model": model, "file": relpath,
-            "endpoint": endpoint, "expected_bytes": expected_size,
-            "total_bytes": model_total,
-        }, ensure_ascii=False), flush=True)
-        cmd = [
-            curl, "-L", "--fail", "--silent", "--show-error", "--retry", "3",
-            "--retry-delay", "2", "--connect-timeout", "15",
-            "-C", "-", "-o", str(part), url,
-        ]
-        proc = subprocess.Popen(cmd)
-        last_size = -1
-        while proc.poll() is None:
+
+        if part.is_file() and part.stat().st_size == expected_size:
+            if expected_sha256 is None or _file_sha256(part) == expected_sha256:
+                part.replace(target)
+                emit_progress(expected_size, endpoint)
+                return expected_size
+
+        if part.is_file() and part.stat().st_size >= expected_size:
+            print(json.dumps({
+                "event": "download_reset", "model": model, "file": relpath,
+                "endpoint": endpoint, "reason": "invalid_partial",
+                "actual_bytes": part.stat().st_size, "expected_bytes": expected_size,
+            }, ensure_ascii=False), flush=True)
+            part.unlink()
+
+        for attempt in range(2):
+            resumed = part.is_file() and part.stat().st_size > 0
+            print(json.dumps({
+                "event": "download_start", "model": model, "file": relpath,
+                "endpoint": endpoint, "expected_bytes": expected_size,
+                "total_bytes": model_total, "resumed": resumed, "attempt": attempt + 1,
+            }, ensure_ascii=False), flush=True)
+            cmd = [
+                curl, "-L", "--fail", "--silent", "--show-error", "--retry", "3",
+                "--retry-delay", "2", "--connect-timeout", "15",
+            ]
+            if resumed:
+                cmd += ["-C", "-"]
+            cmd += ["-o", str(part), url]
+            proc = subprocess.Popen(cmd)
+            last_size = -1
+            while proc.poll() is None:
+                current_size = part.stat().st_size if part.exists() else 0
+                if current_size != last_size:
+                    emit_progress(min(current_size, expected_size), endpoint)
+                    last_size = current_size
+                time.sleep(0.25)
             current_size = part.stat().st_size if part.exists() else 0
-            if current_size != last_size:
-                emit_progress(current_size, endpoint)
-                last_size = current_size
-            time.sleep(0.25)
-        current_size = part.stat().st_size if part.exists() else 0
-        emit_progress(current_size, endpoint)
-        if proc.returncode == 0 and part.is_file() and current_size == expected_size:
-            if expected_sha256 and _file_sha256(part) != expected_sha256:
-                errors.append(f"{endpoint}: SHA-256 校验失败")
+            emit_progress(min(current_size, expected_size), endpoint)
+            valid_size = proc.returncode == 0 and current_size == expected_size
+            actual_hash = _file_sha256(part) if valid_size and expected_sha256 else None
+            if valid_size and (expected_sha256 is None or actual_hash == expected_sha256):
+                part.replace(target)
+                print(json.dumps({
+                    "event": "download_done", "model": model, "file": relpath,
+                    "bytes": expected_size, "endpoint": endpoint,
+                }, ensure_ascii=False), flush=True)
+                emit_progress(expected_size, endpoint)
+                return expected_size
+
+            error = (f"SHA-256 校验失败（{actual_hash}）"
+                     if valid_size else f"curl={proc.returncode}, size={current_size}, expected={expected_size}")
+            print(json.dumps({
+                "event": "download_failure", "model": model, "file": relpath,
+                "endpoint": endpoint, "reason": error,
+            }, ensure_ascii=False), flush=True)
+            if resumed and attempt == 0:
                 part.unlink(missing_ok=True)
                 continue
-            part.replace(target)
-            print(json.dumps({
-                "event": "download_done", "model": model, "file": relpath,
-                "bytes": expected_size, "endpoint": endpoint
-            }, ensure_ascii=False), flush=True)
-            emit_progress(expected_size, endpoint)
-            return expected_size
-        errors.append(f"{endpoint}: curl={proc.returncode}, size={current_size}")
+            errors.append(f"{endpoint}: {error}")
+            # Keep smaller interrupted parts for their own source only.
+            if part.exists() and (proc.returncode == 0 or current_size >= expected_size):
+                part.unlink()
+            break
     raise RuntimeError(f"下载失败 {relpath}: " + " | ".join(errors))
 
 

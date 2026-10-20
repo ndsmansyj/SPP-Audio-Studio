@@ -1,114 +1,80 @@
 <div align="center">
 
-<img src="assets/icon/readme_icon.png" width="156" height="156" alt="SPP Audio Studio 图标">
+<img src="assets/icon/readme_icon.png" width="144" height="144" alt="SPP Audio Studio 图标">
 
 # SPP Audio Studio
 
 **面向创作者的本地 AI 音频工作台**
 
-Windows · macOS
+Windows · macOS ｜ 格式转换 · 人声分离 · 声音克隆
 
-格式转换 · 人声分离 · 声音克隆
+**当前版本：v1.0.2（双平台）**
 
-**macOS · v1.0.2  |  Windows · v1.0.1**
-
-[下载最新版本](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/latest)
+[下载 v1.0.2](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/tag/v1.0.2) · [更新日志](CHANGELOG.md) · [反馈问题](https://github.com/ndsmansyj/SPP-Audio-Studio/issues)
 
 </div>
 
 ---
 
-SPP Audio Studio 把常用的本地音频处理集中到一个简单的桌面应用里：拖入文件、选择需要的结果，然后导出或试听。AI 模型与音频处理优先在本机运行。
+SPP Audio Studio 将音频格式转换、人声分离、声音克隆和试听集中到一款桌面软件中。输入文件默认只读，生成结果另存；AI 模型与推理主要在本机运行。
 
-## 下载
+## 下载与安装
 
-macOS 请下载 **[v1.0.2](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/tag/v1.0.2)**；Windows 目前仍使用 **[v1.0.1](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/tag/v1.0.1)**。不要把 macOS 的 8-bit MLX 模型复制到 Windows 使用。
-
-| 平台 | 安装包 | 运行要求 |
+| 平台 | 版本与安装包 | 系统要求 |
 | --- | --- | --- |
-| **Windows 1.0.1** | [SPPAudioStudio-1.0.1-win-x64.zip](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/download/v1.0.1/SPPAudioStudio-1.0.1-win-x64.zip) | Windows 10 / 11 x64；AI 功能推荐 NVIDIA GPU |
-| **macOS 1.0.2** | [SPP-Audio-Studio-1.0.2.dmg](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/download/v1.0.2/SPP-Audio-Studio-1.0.2.dmg) | Apple Silicon · macOS 14+ |
+| **Windows x64** | [SPPAudioStudio-1.0.2-win-x64.zip](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/download/v1.0.2/SPPAudioStudio-1.0.2-win-x64.zip) | Windows 10 / 11 x64；AI 功能建议使用 NVIDIA GPU |
+| **macOS** | [SPP-Audio-Studio-1.0.2.dmg](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/download/v1.0.2/SPP-Audio-Studio-1.0.2.dmg) | Apple Silicon；macOS 14 或更高 |
 
-对应的 Release 页面提供安装包与 SHA-256 校验文件。Windows 1.0.2 修复仍在单独验证中，暂不发布。
+**[查看完整 Release 与 SHA-256 校验文件](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/tag/v1.0.2)**
 
-> 从旧版更新：Windows 解压到新文件夹运行 `SPP Audio Studio.exe`，macOS 拖动 `.app` 覆盖旧版。已有模型、缓存、模板、历史数据在用户数据目录中保留，不需要重新下载。
+- **Windows：** 解压 ZIP 到独立文件夹，运行 `SPP Audio Studio.exe`。请勿只提取 EXE 或删除随附的 `app`、`worker`、`python-core` 文件夹。
+- **macOS：** 打开 DMG，将 App 拖入“应用程序”文件夹；如果系统提示无法验证开发者，可在“系统设置 → 隐私与安全性”确认打开。
+- **旧版本升级：** Windows 使用新版独立文件夹；macOS 可覆盖旧版应用。存放在用户数据目录的模型、模板和历史记录会保留。
 
-> 首次使用 AI 功能时，需要在「模型与环境」页面下载对应模型与运行环境。
+普通用户无需自行安装系统 Python、Homebrew 或 Xcode。AI 功能首次运行时，进入软件的**「模型与环境」**安装所需的模型和运行环境。
 
 ## 功能
-| 功能 | 可以做什么 |
+
+| 模块 | 功能 |
 | --- | --- |
-| **格式转换** | 处理受支持的本地音频文件，统一输出为可用格式。 |
-| **人声分离** | 使用 Mel-Deux 导出人声、伴奏，或同时导出两者。 |
-| **声音克隆** | 使用 Qwen3-TTS 和参考音生成语音，支持常用人声模板。 |
+| **格式转换** | 导入支持的音频文件并另存转换结果 |
+| **人声分离** | 使用 Mel-Deux 分离人声、伴奏或同时导出 |
+| **声音克隆** | 使用 Qwen3-TTS 和参考音生成语音，管理常用人声模板 |
+| **试听与历史** | 在应用内预览结果、管理任务和查看处理历史 |
+| **模型管理** | 下载、校验或链接已有模型，检查本机运行环境 |
 
-## 特点
+## v1.0.2 更新重点
 
-- **双端正式版**：Windows 与 macOS 均已进入 1.0。
-- **本地优先**：素材和 AI 推理尽量在本机完成。
-- **源文件只读**：不覆盖原始音频，同名输出自动生成新文件名。
-- **统一工作流**：转换、分离、声音克隆、试听与任务队列集中在一个应用中。
-- **模型管理**：模型与运行环境可在应用内安装、检查和切换。
-- **可诊断**：遇到问题可以复制诊断信息，便于反馈与排查。
+**macOS：** 修复 Qwen 下载时错误断点文件导致的反复失败，增加 ModelScope / Hugging Face 自动换源，以及手动下载地址、模型存放目录入口。下载文件继续经过大小和 SHA-256 校验。
 
-## Windows
+**Windows：** 修复切换来源时混用断点缓存的问题，增强失败恢复；增加模型下载地址与路径入口。Runtime 安装时的临时目录和 pip 缓存现在跟随 Runtime 目录，减少 C 盘空间不足造成的安装失败。
 
-Windows 版为 WinUI 3 独立实现，自带 Python Core，普通用户无需预装 Python。
+**模型与 Runtime 是两类不同数据。** Windows 的“模型存储位置”只控制模型文件，不会迁移 CUDA / PyTorch Runtime。若 C 盘空间不足，请检查 Runtime 和系统盘的实际剩余空间。macOS 使用 MLX 8-bit Qwen 权重，Windows 使用不同的 CUDA 版本模型，两者不能直接互换。
 
-模型下载会根据当前网络自动测速选源，包括 ModelScope、国内 PyPI 镜像、HF Mirror 与官方源等。
+以上版本已通过自动化测试和构建检查；不同用户的网络状况、CUDA 环境及完整模型首次下载仍可能需要单独诊断。
 
-Windows 的开发、构建、Agent API 与技术说明见：
+## 故障排查
 
-**[Windows README](windows/README.md)**
+打开「模型与环境」→「刷新检查／重新检查」，使用**「复制诊断报告」**并将报告发至 [GitHub Issues](https://github.com/ndsmansyj/SPP-Audio-Studio/issues)。下载失败时，也可以展开模型卡片中的手动下载入口并按照目录结构保存文件。
 
-## macOS
-macOS 版面向 Apple Silicon，当前要求 macOS 14+。
+## 开发与接口
 
-普通用户不需要额外安装 Xcode、Command Line Tools、Homebrew 或系统 Python。首次使用 AI 功能时，在「模型与环境」页面完成所需组件安装即可。
+- [Windows 开发、模型与 Runtime 说明](windows/README.md)
+- [macOS 本机 API](LOCAL_API.md)
+- [完整更新记录](CHANGELOG.md)
 
-macOS 版 Qwen3-TTS 默认先从 ModelScope 下载，失败后自动切换到 Hugging Face 镜像与官方固定版本；也可手动设置官方优先或镜像优先。所有来源下载的模型均必须通过固定大小和 SHA-256 校验。
-
-在「模型与环境」中展开模型卡片的「手动下载与存放位置」，可复制主权重或全部文件的固定版本下载地址、打开 App 自己的模型目录，并复制目录路径。手动下载时要保留模型目录层级（尤其是 `speech_tokenizer/`）；已有的有效文件可以由 App 校验并跳过，只补下载缺少的文件。下载中断时会保留可续传的较小临时文件，自动清理异常大小的缓存。
-
-如果 macOS 提示“无法验证开发者”，可前往 **系统设置 → 隐私与安全性 → 仍要打开**。
-
-## 反馈与诊断
-
-如果遇到问题：
-
-1. 打开「模型与环境」。
-2. 点击 **复制诊断报告**。
-3. 将报告粘贴到 GitHub Issue，并简单说明复现步骤。
-
-诊断报告默认隐藏用户名、完整文件路径和声音克隆正文。
-
-## 本机 API
-
-SPP Audio Studio 提供本机接口，可用于连接本地脚本、自动化工作流或 Agent。
-
-macOS 使用说明见 [LOCAL_API.md](LOCAL_API.md)，Windows 说明见 [windows/README.md](windows/README.md)。
-
-## 从源码构建
-
-Windows：
+从源码构建：
 
 ```powershell
 .\windows\build.ps1 -Configuration Release -Platform x64
 ```
 
-macOS：
-
 ```bash
 ./scripts/build_local.sh
 ```
-## 许可证
 
-项目代码采用 [MIT License](LICENSE)。
+## 许可证与第三方素材
 
-默认演示人声、像素头像 / 品牌图标和第三方模型分别遵循独立条款；使用或再分发前请阅读：
+本项目代码采用 [MIT License](LICENSE)。内置默认演示人声、图标与第三方模型遵守各自许可，详情见 [人声素材说明](VOICE_ASSET_LICENSE.md)、[品牌素材说明](BRANDING_ASSET_LICENSE.md) 和 [第三方声明](THIRD_PARTY_NOTICES.md)。
 
-- [人声素材说明](VOICE_ASSET_LICENSE.md)
-- [品牌与肖像素材说明](BRANDING_ASSET_LICENSE.md)
-- [第三方声明](THIRD_PARTY_NOTICES.md)
-
-Mel-Deux 模型采用 **CC BY-NC 4.0**，不适用于商业用途。
+**Mel-Deux 模型采用 CC BY-NC 4.0，不适用于商业用途。**

@@ -2,14 +2,24 @@
 
 This file tracks public, user-facing changes. Internal RC test notes and handoff documents are intentionally kept out of the public project tree.
 
-## 1.0.2 — 2026-10-19 (macOS only)
+## 1.0.2 — macOS 2026-10-19 / Windows 2026-10-20
 
-- Recover valid completed `.part` model files, discard oversized/corrupt partials before retrying, and restart a failed resumed transfer once from zero.
-- Allow Qwen to fall back from ModelScope to revision-pinned Hugging Face sources without bypassing size or SHA-256 verification; respect the selected download source order.
-- Add per-model manual download links (single main weight or full set) and Finder destination controls in the macOS UI.
-- Add regression tests for corrupt/oversized partials, interrupted transfers, valid-file reuse, and source fallback.
+### macOS
+- Recover valid completed model `.part` files, discard oversized or corrupt partials, and retry failed resumed downloads from zero.
+- Allow Qwen to fall back among ModelScope, Hugging Face mirror and revision-pinned official source without bypassing size and SHA-256 verification.
+- Add manual fixed-version model links and Finder model storage location controls.
 
-Windows 在此版本未改变，继续使用 v1.0.1 安装包。
+### Windows
+- Isolate resumable model downloads per source, detect and recover corrupt/oversized partial downloads, and validate major weights with SHA-256.
+- Add manual fixed-revision model links, model storage directory and Runtime directory controls.
+- Changing a download source no longer accidentally cancels an in-progress model download.
+- Place Python/CUDA Runtime install staging, pip cache and temporary unpack paths beneath Runtime so users who redirect Runtime to another drive move these temporary files as well.
+- Include low-space diagnostics and regression tests for resumed downloads and Runtime staging.
+
+### Distribution
+- Publish Windows x64 portable ZIP and macOS Apple Silicon DMG with matching v1.0.2 user-facing versions.
+- Windows portable package rebuilds WinUI and the frozen Windows Worker against the verified v1.0.1 support files and Python Core; the full archive and SHA-256 are checked before publication.
+- Preserve external/user-managed models, Runtime, templates, histories and output data during app replacement.
 
 ## 1.0.1 — 2026-10-15
 
