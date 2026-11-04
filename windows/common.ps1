@@ -34,6 +34,24 @@ function Get-VsInstallationPath {
     $arguments += @('-property', 'installationPath')
     $installation = (& $vswhere @arguments | Select-Object -First 1)
     if ($installation) { return $installation.Trim() }
+
+    # GitHub-hosted Windows images can provide MSBuild, the Windows SDK, and
+    # C++ build tools without advertising the UniversalBuildTools workload ID.
+    # Keep local prerequisite checks strict, but let CI prove the hosted image
+    # by attempting the real WinUI/PRI/native-launcher build.
+    if ($RequireUniversalBuildTools -and $env:GITHUB_ACTIONS -eq 'true') {
+        $fallbackArguments = @(
+            '-latest', '-products', '*',
+            '-requires', 'Microsoft.Component.MSBuild',
+            '-property', 'installationPath'
+        )
+        $installation = (& $vswhere @fallbackArguments | Select-Object -First 1)
+        if ($installation) {
+            Write-Warning 'GitHub hosted runner: UniversalBuildTools workload marker not found; validating the available Visual Studio toolchain with the real build.'
+            return $installation.Trim()
+        }
+    }
+
     return $null
 }
 
