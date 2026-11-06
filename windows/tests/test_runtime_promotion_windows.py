@@ -60,7 +60,7 @@ class RuntimePromotionWindowsTests(unittest.TestCase):
         # directory requires FILE_FLAG_BACKUP_SEMANTICS even without elevation.
         handle = self.kernel32.CreateFileW(
             str(locked_path),
-            0x0080,  # FILE_READ_ATTRIBUTES
+            0x80000000,  # GENERIC_READ; metadata-only access does not block rename
             0x0001 | 0x0002,  # FILE_SHARE_READ | FILE_SHARE_WRITE
             None,
             3,  # OPEN_EXISTING

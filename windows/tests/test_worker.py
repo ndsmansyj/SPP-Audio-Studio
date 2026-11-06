@@ -1025,9 +1025,9 @@ class WorkerTests(unittest.TestCase):
                 if corruption == "missing_module":
                     (sites[0] / "ctranslate2").rmdir()
                 else:
-                    marker = json.loads((staged / "installed.json").read_text())
+                    marker = json.loads((staged / "installed.json").read_text(encoding="utf-8"))
                     marker["runtime"] = "qwen"
-                    (staged / "installed.json").write_text(json.dumps(marker))
+                    (staged / "installed.json").write_text(json.dumps(marker), encoding="utf-8")
                 code, result = self.install_asr_for_test(worker)
                 self.assertEqual(code, 0)
                 self.assertTrue(result["runtime_health"]["healthy"])
