@@ -1039,15 +1039,35 @@ def _runtime_installed(kind: str) -> bool:
     return probe_ffmpeg(root / "ffmpeg" / "ffmpeg.exe")["ready"]
 
 
-def _promote_runtime(staged: Path, final: Path) -> None:
-    """Same-volume directory promotion with rollback if the replacement fails."""
+PROMOTE_RETRY_WINERRORS = (5, 32)  # ACCESS_DENIED, SHARING_VIOLATION
+
+
+def _promote_runtime(staged: Path, final: Path, attempts: int = 4) -> None:
+    """Same-volume directory promotion with rollback if the replacement fails.
+
+    Renaming the staged directory can fail with WinError 5/32 on Windows while
+    antivirus or the search indexer still holds handles on files pip just wrote,
+    even though nothing in the application itself is using them. Moving the
+    previous runtime aside always succeeds in that state, so a short backoff
+    retry is enough to complete the swap instead of discarding a verified install.
+    """
     backup = final.with_name(f".{final.name}-runtime-previous-{time.time_ns()}")
     had_previous = final.exists()
     if had_previous:
         os.replace(final, backup)
-    try:
-        os.replace(staged, final)
-    except OSError:
+    last_error: OSError | None = None
+    for attempt in range(attempts):
+        try:
+            os.replace(staged, final)
+            last_error = None
+            break
+        except OSError as exc:
+            last_error = exc
+            retryable = getattr(exc, "winerror", None) in PROMOTE_RETRY_WINERRORS
+            if not retryable or attempt == attempts - 1:
+                break
+            time.sleep(1.5 * (2 ** attempt))
+    if last_error is not None:
         if had_previous:
             # Do not delete either directory if rollback itself fails. The error
             # includes the retained backup path so the installation is recoverable.
@@ -1055,7 +1075,7 @@ def _promote_runtime(staged: Path, final: Path) -> None:
                 os.replace(backup, final)
             except OSError as rollback_error:
                 raise RuntimeError(f"替换失败，原运行环境保留在 {backup}；恢复失败：{rollback_error}") from rollback_error
-        raise
+        raise last_error
     if had_previous:
         shutil.rmtree(backup, ignore_errors=True)
 
