@@ -1162,7 +1162,7 @@ def _try_resume_runtime(kind: str, staging_root: Path, final: Path, repair: bool
                 except (OSError, RuntimeError) as error:
                     return _runtime_activation_failed(kind, staged, final, error)
                 return _runtime_install_done(kind, final, verification, repair, reused=True)
-    except TimeoutError as error:
+    except OSError as error:
         return _runtime_activation_failed(kind, staged, final, error)
     return None
 

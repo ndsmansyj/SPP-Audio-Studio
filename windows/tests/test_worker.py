@@ -969,6 +969,28 @@ class WorkerTests(unittest.TestCase):
             self.assertIn(str(backups[0]), result["error"])
             self.assertIn(str(sites[0].parent), result["error"])
 
+    def test_pending_repair_preserves_stage_when_lock_file_access_is_denied(self):
+        with self.runtime_activation_case() as (worker, final, sites):
+            replace = os.replace
+
+            def deny_activation(source, destination):
+                if Path(source).parent.name == ".spp-install-staging" and Path(destination) == final:
+                    raise PermissionError("directory is busy")
+                return replace(source, destination)
+
+            with patch.object(worker.os, "replace", side_effect=deny_activation):
+                self.install_asr_for_test(worker)
+            denied = PermissionError("gpu.lock access denied")
+            denied.winerror = 5
+            with patch.object(worker, "gpu_lock", side_effect=denied):
+                code, result = self.install_asr_for_test(worker)
+            self.assertEqual(code, 4)
+            self.assertEqual(result.get("error_code"), "runtime_activation_blocked")
+            self.assertEqual(result.get("winerror"), 5)
+            self.assertTrue(sites[0].is_dir())
+            self.assertEqual(len(sites), 1)
+            self.assertEqual((final / "identity").read_text(), "previous")
+
     def test_interrupted_activation_can_resume_without_redownloading(self):
         with self.runtime_activation_case() as (worker, final, sites):
             replace = os.replace
