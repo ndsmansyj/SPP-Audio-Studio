@@ -2,6 +2,21 @@
 
 This file tracks public, user-facing changes. Internal RC test notes and handoff documents are intentionally kept out of the public project tree.
 
+## 1.0.3 — Windows 2026-11-06
+
+### Windows
+- Merge the WinUI default control resources at application startup, fixing missing theme-resource crashes when entering and refreshing the model/environment page.
+- Prefer application-managed FFmpeg candidates and verify execution before marking audio tools ready; an invalid system PATH candidate no longer hides a working managed copy.
+- Separate runtime installation from health and feature readiness, and add an explicit repair path for damaged or stale environments.
+- Handle clipboard failures without terminating the application, add a diagnostic-file export, and publish the window icon as an external resource.
+- Preserve the current 12Hz Qwen audio processing, playback controls, user models, voice templates and history.
+
+### Distribution
+- Build the launcher, WinUI app, converter, Worker, bridge scripts and Python Core from one source checkout instead of assembling a release from an older ZIP.
+- Validate the final archive manifest and perform a GUI smoke test that waits for environment-page refreshes.
+- Update the main download links and add `START-HERE.md` as the current project entry point.
+- macOS remains on v1.0.2.
+
 ## 1.0.2 — macOS 2026-10-19 / Windows 2026-10-20
 
 ### macOS

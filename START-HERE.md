@@ -1,0 +1,28 @@
+# SPP Audio Studio 项目入口
+
+## 当前发行
+
+| 平台 | 正式版本 | 下载 |
+| --- | --- | --- |
+| Windows 10 / 11 x64 | **1.0.3** | [完整便携 ZIP](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/download/v1.0.3/SPPAudioStudio-1.0.3-win-x64.zip) · [Release / SHA-256](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/tag/v1.0.3) |
+| macOS 14+ Apple Silicon | **1.0.2** | [DMG](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/download/v1.0.2/SPP-Audio-Studio-1.0.2.dmg) |
+
+Windows 请完整解压到新目录，运行根目录的 `SPP Audio Studio.exe`。原有模型、模板和历史保存在用户数据目录；不要复制旧版 `app/` 或 `worker/` 覆盖新版文件。
+
+## 使用与排障
+
+- [安装、功能与故障排查](README.md)
+- [Windows 构建、Runtime 与诊断](windows/README.md)
+- [版本更新记录](CHANGELOG.md)
+- [构建与回归结果](https://github.com/ndsmansyj/SPP-Audio-Studio/actions)
+- [反馈问题](https://github.com/ndsmansyj/SPP-Audio-Studio/issues)
+
+## 开发入口
+
+Windows UI 位于 `windows/src/SPPAudioStudio.Windows/`；任务与进程协议位于 `windows/src/SPPAudioStudio.Core/`；运行环境、模型和音频任务位于 `windows/worker/`。
+
+Windows 1.0.3 修复 WinUI 资源初始化、音频工具探测、环境修复与诊断操作。后续发布沿用完整构建和最终包验证流程，保留现有播放器异步请求保护与 CUDA-only 推理策略。
+
+以当前 `main` 和 Release 对应的提交为源码入口。历史 Windows 1.0.2 标签早于其最终 Windows 构建提交；复核旧版本时同时查阅该 Release 的来源说明。
+
+macOS 开发入口为 `app/` 与 `scripts/build_local.sh`。本次 Windows 修复不改变 macOS 1.0.2 的应用版本。
