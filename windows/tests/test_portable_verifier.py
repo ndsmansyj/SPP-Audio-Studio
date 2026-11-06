@@ -53,6 +53,17 @@ class PortableIntegrityTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result, verifier.verify_zip(self.zip(), "1.0.3", "a" * 40))
 
+    def test_windows_runtime_filename_case_matches_required_component(self):
+        # The Windows App SDK MSIX ships Microsoft.ui.xaml.dll. Windows loads
+        # it under the same name as Microsoft.UI.Xaml.dll, while ZIP preserves case.
+        original = self.root / "app/Microsoft.UI.Xaml.dll"
+        temporary = original.with_name("runtime-case.tmp")
+        original.rename(temporary)
+        temporary.rename(original.with_name("Microsoft.ui.xaml.dll"))
+        self.seal()
+        self.assertTrue(verifier.verify_root(self.root)["ok"])
+        self.assertTrue(verifier.verify_zip(self.zip())["ok"])
+
     def test_modified_binary_is_rejected(self):
         (self.root / "app/SPPAudioStudio.Windows.exe").write_bytes(b"altered")
         with self.assertRaisesRegex(ValueError, "size/hash mismatch"):

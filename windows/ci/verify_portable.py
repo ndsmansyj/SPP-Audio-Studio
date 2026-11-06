@@ -48,8 +48,11 @@ def verify_root(root: pathlib.Path, version: str | None = None, commit: str | No
         raise ValueError("Case-insensitive duplicate portable filenames")
     for name in files:
         safe_relative(name)
-    missing = set(REQUIRED) | METADATA
-    missing.difference_update(files)
+    # Windows component lookup is case-insensitive; the manifest and checksum
+    # lists below still bind each exact archived spelling to its content.
+    windows_names = {name.casefold() for name in files}
+    missing = {name for name in REQUIRED if name.casefold() not in windows_names}
+    missing.update(METADATA - files.keys())
     if missing:
         raise ValueError(f"Required portable components missing: {sorted(missing)}")
     if not any(name.startswith("app/") and name.endswith(".pri") for name in files):
