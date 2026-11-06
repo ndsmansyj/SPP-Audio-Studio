@@ -2,6 +2,19 @@
 
 This file tracks public, user-facing changes. Internal RC test notes and handoff documents are intentionally kept out of the public project tree.
 
+## 1.0.4 — Windows 2026-11-06
+
+### Windows
+- Retry transient Windows access/sharing errors when activating or rolling back a prepared runtime, including the Whisper ASR repair path.
+- Report persistent directory-switch failures as local activation errors; do not retry a download mirror or discard the verified installation.
+- Preserve the previous runtime and prepared files if activation or rollback fails. A subsequent repair revalidates and reuses a complete prepared runtime, including after an interrupted activation.
+- Keep models, voice templates, history and existing Qwen/Mel installation recipes unchanged.
+
+### Validation and distribution
+- Add native Windows directory-handle regression tests for both sides of the runtime switch.
+- Test the actual frozen Worker with real ASR packages: repair a legacy environment, hold the active directory open, verify failure preserves both environments, release the handle and resume without another pip installation.
+- Rebuild the complete Windows portable package and update the download entry points. macOS remains on v1.0.2.
+
 ## 1.0.3 — Windows 2026-11-06
 
 ### Windows

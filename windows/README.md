@@ -1,6 +1,6 @@
 # SPP Audio Studio for Windows
 
-当前 Windows 正式版为 **1.0.3**。从[发行页面](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/tag/v1.0.3)下载完整 ZIP，解压到新目录，运行根目录的 `SPP Audio Studio.exe`。目标机器不需要预装 Python 或 .NET。
+当前 Windows 正式版为 **1.0.4**。从[发行页面](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/tag/v1.0.4)下载完整 ZIP，解压到新目录，运行根目录的 `SPP Audio Studio.exe`。目标机器不需要预装 Python 或 .NET。
 
 ## 使用、升级与修复
 
@@ -9,6 +9,8 @@
 升级时使用新目录，保留完整的 `app/`、`worker/`、`python-core/` 和启动器。不要从旧 ZIP 复制单个 EXE 或桥接脚本覆盖新版。用户数据默认保存在 `%LOCALAPPDATA%\SPP Audio Studio\`，包含模型、声音模板、运行环境、缓存、设置和历史，更新应用不会删除这些数据。
 
 「模型与环境」分别展示模型、运行环境和硬件状态。安装记录存在不等于组件健康；运行环境完整也不等于当前机器具备 CUDA 推理能力。运行环境损坏时，使用对应卡片的修复操作。修复会先在暂存目录准备并校验新环境，成功后再替换旧环境。
+
+Windows 短暂占用运行环境目录时，切换和回滚会在 10 秒内重试。持续失败会保留已校验的暂存目录，并明确提示本地切换受阻；不会因此换源重新下载。等相关任务结束、关闭其它 SPP 实例后，再点同一运行环境的修复，程序会重新校验并优先复用暂存文件。若回滚失败，原环境备份位置也会显示在错误中；请保留这些目录并保存诊断。
 
 复制诊断或路径遇到剪贴板占用时会显示提示；也可以保存诊断文件。反馈问题时附上诊断文件、操作步骤和日志。FFmpeg 优先使用应用管理的副本，并检查实际执行结果，避免系统 PATH 中的空文件、无效链接或错误架构程序误报就绪。
 
@@ -89,7 +91,7 @@ PowerShell 脚本解析与真实 WinUI 测试应在 Windows 执行。无 GPU 的
 ## 完整便携包发布
 
 ```powershell
-.\windows\publish.ps1 -Version 1.0.3 -Platform x64
+.\windows\publish.ps1 -Version 1.0.4 -Platform x64
 ```
 
 发布从当前源码构建全部组件，不拼接旧版 ZIP：
@@ -105,13 +107,13 @@ SPP Audio Studio/
   SHA256SUMS
 ```
 
-WinUI 和转换器包含 .NET 运行时；Worker 使用 PyInstaller `--onedir`；CUDA 桥接使用随包提供的真实 CPython。输出 ZIP 为 `windows/artifacts/packages/SPPAudioStudio-1.0.3-win-x64.zip`，保留顶层文件夹，并附带 `.sha256`。
+WinUI 和转换器包含 .NET 运行时；Worker 使用 PyInstaller `--onedir`；CUDA 桥接使用随包提供的真实 CPython。输出 ZIP 为 `windows/artifacts/packages/SPPAudioStudio-1.0.4-win-x64.zip`，保留顶层文件夹，并附带 `.sha256`。
 
 最终包验证应解压 ZIP，检查全部清单文件、大小、SHA-256、关键组件和源码提交，再从解压后的包启动界面。界面回归覆盖「模型与环境」异步检查完成与页面反复切换；仅看见主窗口不算通过。
 
 ```powershell
-Get-FileHash .\windows\artifacts\packages\SPPAudioStudio-1.0.3-win-x64.zip -Algorithm SHA256
-Get-Content .\windows\artifacts\packages\SPPAudioStudio-1.0.3-win-x64.zip.sha256
+Get-FileHash .\windows\artifacts\packages\SPPAudioStudio-1.0.4-win-x64.zip -Algorithm SHA256
+Get-Content .\windows\artifacts\packages\SPPAudioStudio-1.0.4-win-x64.zip.sha256
 ```
 
 ## 启动与 CI
@@ -121,6 +123,6 @@ Get-Content .\windows\artifacts\packages\SPPAudioStudio-1.0.3-win-x64.zip.sha256
 .\windows\launch.ps1 -Development
 ```
 
-实际生效的 GitHub Actions 位于仓库根目录 `.github/workflows/`。Windows 稳定性流水线执行 Python 与 C# 回归、完整发布和最终包检查，保存 ZIP、校验和与验证报告；正式发行上传已经验证的同一份 ZIP。
+实际生效的 GitHub Actions 位于仓库根目录 `.github/workflows/`。Windows 稳定性流水线执行 Python 与 C# 回归、完整发布和最终包检查。原生 Windows 测试用真实目录句柄阻止重命名，再释放句柄验证重试。最终包中的 Worker 还会安装真实 ASR 依赖、修复旧环境，验证目录持续占用时保留环境，以及释放后不重复安装便可恢复。流水线保存 ZIP、校验和、安装日志与验证报告；正式发行上传已经验证的同一份 ZIP。该流程不下载 Whisper 模型，也不替代 CUDA 模型推理验收。
 
 版本与来源提交记录在包内 `release-manifest.json`。发布标签、Release 说明和下载入口应指向相同的源码版本；历史恢复流程不再自动覆盖已有正式版资产。

@@ -8,9 +8,9 @@
 
 Windows · macOS ｜ 格式转换 · 人声分离 · 声音克隆
 
-**当前版本：Windows v1.0.3 · macOS v1.0.2**
+**当前版本：Windows v1.0.4 · macOS v1.0.2**
 
-[下载 Windows v1.0.3](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/tag/v1.0.3) · [项目入口](START-HERE.md) · [更新日志](CHANGELOG.md) · [反馈问题](https://github.com/ndsmansyj/SPP-Audio-Studio/issues)
+[下载 Windows v1.0.4](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/tag/v1.0.4) · [项目入口](START-HERE.md) · [更新日志](CHANGELOG.md) · [反馈问题](https://github.com/ndsmansyj/SPP-Audio-Studio/issues)
 
 </div>
 
@@ -22,10 +22,10 @@ SPP Audio Studio 将音频格式转换、人声分离、声音克隆和试听集
 
 | 平台 | 版本与安装包 | 系统要求 |
 | --- | --- | --- |
-| **Windows x64** | [SPPAudioStudio-1.0.3-win-x64.zip](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/download/v1.0.3/SPPAudioStudio-1.0.3-win-x64.zip) | Windows 10 / 11 x64；AI 功能使用受支持的 NVIDIA GPU |
+| **Windows x64** | [SPPAudioStudio-1.0.4-win-x64.zip](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/download/v1.0.4/SPPAudioStudio-1.0.4-win-x64.zip) | Windows 10 / 11 x64；AI 功能使用受支持的 NVIDIA GPU |
 | **macOS** | [SPP-Audio-Studio-1.0.2.dmg](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/download/v1.0.2/SPP-Audio-Studio-1.0.2.dmg) | Apple Silicon；macOS 14 或更高 |
 
-**[Windows Release 与 SHA-256 校验文件](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/tag/v1.0.3)** · [macOS v1.0.2](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/tag/v1.0.2)
+**[Windows Release 与 SHA-256 校验文件](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/tag/v1.0.4)** · [macOS v1.0.2](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/tag/v1.0.2)
 
 - **Windows：** 解压 ZIP 到独立文件夹，运行 `SPP Audio Studio.exe`。请勿只提取 EXE 或删除随附的 `app`、`worker`、`python-core` 文件夹。
 - **macOS：** 打开 DMG，将 App 拖入“应用程序”文件夹；如果系统提示无法验证开发者，可在“系统设置 → 隐私与安全性”确认打开。
@@ -43,13 +43,13 @@ SPP Audio Studio 将音频格式转换、人声分离、声音克隆和试听集
 | **试听与历史** | 在应用内预览结果、管理任务和查看处理历史 |
 | **模型管理** | 下载、校验或链接已有模型，检查本机运行环境 |
 
-## Windows v1.0.3 更新重点
+## Windows v1.0.4 更新重点
 
-- 修复进入「模型与环境」后因 WinUI 控件资源缺失导致的闪退。
-- 音频工具优先使用应用管理的 FFmpeg，并验证能否执行，避免系统 PATH 中的无效程序造成克隆失败。
-- 改进运行环境健康检查和修复，区分已安装与功能就绪；生成、转写和人声分离使用各自的依赖状态。
-- 复制诊断或路径失败时显示提示，提供诊断文件保存入口；补齐窗口图标发布资源。
-- 从同一份源码完整构建 Windows 便携包，验证最终 ZIP 的文件清单和真实界面操作。
+- 修复 Whisper 等运行环境在目录切换时遇到 Windows 拒绝访问的问题：短暂占用自动重试，持续失败明确提示本地目录切换受阻。
+- 本地切换失败不再换下载源重新安装；保留已校验的新环境，下一次修复会重新验证并优先复用。
+- 切换或回滚失败时保留恢复文件，继续保护模型、声音模板与历史记录。
+- 新增真实 Windows 目录占用测试，并从完整发布包验证 ASR 安装、受阻后的保留与恢复。
+- 保留 1.0.3 的 WinUI 启动、FFmpeg 探测和诊断修复。
 
 macOS 当前正式版本仍为 v1.0.2，下载与安装方式见上表。
 

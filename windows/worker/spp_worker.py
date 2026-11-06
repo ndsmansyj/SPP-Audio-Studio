@@ -1039,20 +1039,36 @@ def _runtime_installed(kind: str) -> bool:
     return probe_ffmpeg(root / "ffmpeg" / "ffmpeg.exe")["ready"]
 
 
+def _replace_runtime_directory(source: Path, destination: Path) -> None:
+    """Allow Windows readers/scanners to release a directory, without hiding ACL errors."""
+    deadline = time.monotonic() + 10.0
+    delay = 0.1
+    while True:
+        try:
+            os.replace(source, destination)
+            return
+        except OSError as error:
+            remaining = deadline - time.monotonic()
+            if getattr(error, "winerror", None) not in (5, 32, 33) or remaining <= 0:
+                raise
+            time.sleep(min(delay, remaining))
+            delay = min(delay * 2, 0.75)
+
+
 def _promote_runtime(staged: Path, final: Path) -> None:
     """Same-volume directory promotion with rollback if the replacement fails."""
     backup = final.with_name(f".{final.name}-runtime-previous-{time.time_ns()}")
     had_previous = final.exists()
     if had_previous:
-        os.replace(final, backup)
+        _replace_runtime_directory(final, backup)
     try:
-        os.replace(staged, final)
+        _replace_runtime_directory(staged, final)
     except OSError:
         if had_previous:
             # Do not delete either directory if rollback itself fails. The error
             # includes the retained backup path so the installation is recoverable.
             try:
-                os.replace(backup, final)
+                _replace_runtime_directory(backup, final)
             except OSError as rollback_error:
                 raise RuntimeError(f"替换失败，原运行环境保留在 {backup}；恢复失败：{rollback_error}") from rollback_error
         raise
@@ -1069,6 +1085,86 @@ def _runtime_install_storage() -> tuple[Path, Path]:
     staging.mkdir(parents=True, exist_ok=True)
     pip_cache.mkdir(parents=True, exist_ok=True)
     return staging, pip_cache
+
+
+def _record_pending_runtime(kind: str, staged: Path) -> None:
+    (staged / "activation-pending.json").write_text(
+        json.dumps({"runtime": kind, "manifest_id": manifest_id(kind)}), encoding="utf-8")
+
+
+def _runtime_activation_failed(kind: str, staged: Path, final: Path, error: Exception) -> int:
+    """A local activation failure must never trigger another network installation."""
+    resume_recorded = False
+    try:
+        _record_pending_runtime(kind, staged)
+        resume_recorded = True
+    except OSError:
+        pass  # Preserve the directory even when recording recovery state is denied.
+    guidance = ("请等相关任务结束、关闭其它 SPP 实例后再点修复，将优先复用已准备的文件。"
+                if resume_recorded else "无法记录自动恢复状态，请保存诊断；不要删除上述暂存目录。")
+    return emit({
+        "ok": False, "runtime": kind, "phase": "activate",
+        "error_code": "runtime_activation_blocked", "staging_path": str(staged),
+        "target_path": str(final), "winerror": getattr(error, "winerror", None),
+        "error": f"运行环境文件已准备好，但本地目录切换未完成：{error}。"
+                 f"已准备文件保留在 {staged}；目标目录为 {final}。{guidance}",
+    }, 4)
+
+
+def _runtime_install_done(kind: str, final: Path, verification: dict, repair: bool,
+                          reused: bool = False) -> int:
+    try:
+        (final / "activation-pending.json").unlink(missing_ok=True)
+    except OSError:
+        pass
+    print(json.dumps({"event": "runtime_install_done", "runtime": kind,
+                      "path": str(final), "reused_staging": reused}, ensure_ascii=False), flush=True)
+    return emit({"ok": True, "runtime": kind, "installed": True, "path": str(final),
+                 "repaired": repair, "reused_staging": reused,
+                 "runtime_health": runtime_health(kind, final), "hardware": verification["hardware"]})
+
+
+def _try_resume_runtime(kind: str, staging_root: Path, final: Path, repair: bool) -> int | None:
+    # Only failed, complete activations are candidates. A concurrent installer
+    # does not publish this flag while pip or import verification is running.
+    candidates = [path for path in staging_root.glob(f"runtime-{kind}-*")
+                  if not path.is_symlink() and (path / "activation-pending.json").is_file()]
+    if not candidates:
+        return None
+    staged = candidates[0]
+    try:
+        # Candidate revalidation and promotion share the same commit lock.
+        with gpu_lock(timeout=60):
+            for staged in candidates:
+                try:
+                    pending = json.loads((staged / "activation-pending.json").read_text(encoding="utf-8"))
+                    marker = json.loads((staged / "installed.json").read_text(encoding="utf-8"))
+                    if (not isinstance(pending, dict) or not isinstance(marker, dict)
+                            or pending.get("runtime") != kind or marker.get("runtime") != kind
+                            or pending.get("manifest_id") != manifest_id(kind)
+                            or not runtime_health(kind, staged)["healthy"]):
+                        continue
+                    if kind == "mel" and not _mel_registry_ready(staged / "site-packages"):
+                        continue
+                    verify = _verify_python_import(kind, staged / "site-packages", gpu_locked=True)
+                    if verify.returncode:
+                        continue
+                    verification = _probe_result(verify)
+                    if (verification.get("python_abi") != f"{sys.version_info.major}.{sys.version_info.minor}"
+                            or not probe_ffmpeg(staged / "ffmpeg/ffmpeg.exe")["ready"]):
+                        continue
+                except (OSError, ValueError, TypeError, subprocess.TimeoutExpired):
+                    continue
+                print(json.dumps({"event": "runtime_install_resume", "runtime": kind,
+                                  "path": str(staged)}, ensure_ascii=False), flush=True)
+                try:
+                    _promote_runtime(staged, final)
+                except (OSError, RuntimeError) as error:
+                    return _runtime_activation_failed(kind, staged, final, error)
+                return _runtime_install_done(kind, final, verification, repair, reused=True)
+    except OSError as error:
+        return _runtime_activation_failed(kind, staged, final, error)
+    return None
 
 
 def cmd_runtime_install(args: argparse.Namespace) -> int:
@@ -1100,6 +1196,9 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
     final_dir = {"qwen": QWEN_RUNTIME_DIR, "mel": MEL_RUNTIME_DIR, "asr": ASR_RUNTIME_DIR}[kind]
     errors: list[str] = []
     staging_root, pip_cache = _runtime_install_storage()
+    resumed = _try_resume_runtime(kind, staging_root, final_dir, bool(getattr(args, "repair", False)))
+    if resumed is not None:
+        return resumed
     available = shutil.disk_usage(staging_root).free
     if kind in ("qwen", "mel") and available < 10 * 1024**3:
         print(json.dumps({
@@ -1198,25 +1297,22 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
             staged_health = runtime_health(kind, temp_dir)
             if not staged_health["healthy"]:
                 raise RuntimeError(staged_health["reason"])
-            # Existing jobs keep their runtime until finished. Staging and import
-            # validation never modify the active installation.
-            with gpu_lock(timeout=60):
-                _promote_runtime(temp_dir, final_dir)
         except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
             errors.append(f"{endpoint}: {exc}")
             shutil.rmtree(temp_dir, ignore_errors=True)
             continue
 
-        print(json.dumps({
-            "event": "runtime_install_done",
-            "runtime": kind,
-            "path": str(final_dir),
-            "index": endpoint,
-            "torch_index": torch_endpoint,
-        }, ensure_ascii=False), flush=True)
-        return emit({"ok": True, "runtime": kind, "installed": True, "path": str(final_dir),
-                     "repaired": bool(getattr(args, "repair", False)),
-                     "runtime_health": runtime_health(kind, final_dir), "hardware": verification["hardware"]})
+        # Download/validation errors can try another source. A directory commit
+        # error cannot: retain the verified files and the rollback backup instead.
+        try:
+            with gpu_lock(timeout=60):
+                # The marker is written under the commit lock, before moving
+                # the old runtime, so process interruption is recoverable too.
+                _record_pending_runtime(kind, temp_dir)
+                _promote_runtime(temp_dir, final_dir)
+        except (OSError, RuntimeError) as error:
+            return _runtime_activation_failed(kind, temp_dir, final_dir, error)
+        return _runtime_install_done(kind, final_dir, verification, bool(getattr(args, "repair", False)))
 
     return emit({
         "ok": False,

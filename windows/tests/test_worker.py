@@ -1,7 +1,8 @@
 """Model-free Windows worker contract tests: python -m unittest discover -s windows/tests -v."""
 import http.client
-from contextlib import nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext, redirect_stdout
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -830,6 +831,207 @@ class WorkerTests(unittest.TestCase):
                 worker._promote_runtime(staged, final)
         self.assertEqual((final / "identity").read_text(), "previous")
         self.assertEqual((staged / "identity").read_text(), "replacement")
+
+    def test_runtime_promotion_waits_for_transient_windows_access_errors(self):
+        worker = self.load_worker()
+        for locked_phase, winerror in (("backup", 32), ("activate", 5), ("rollback", 33)):
+            with self.subTest(phase=locked_phase):
+                root = Path(tempfile.mkdtemp(dir=self.tmp.name))
+                final, staged = root / "asr", root / "staged"
+                final.mkdir()
+                staged.mkdir()
+                (final / "identity").write_text("previous")
+                (staged / "identity").write_text("replacement")
+                replace = os.replace
+                blocked = False
+
+                def transient(source, destination):
+                    nonlocal blocked
+                    source = Path(source)
+                    phase = "backup" if source == final else "activate" if source == staged else "rollback"
+                    if locked_phase == "rollback" and phase == "activate":
+                        raise PermissionError("permanent activation failure")
+                    if phase == locked_phase and not blocked:
+                        blocked = True
+                        error = PermissionError("temporarily busy")
+                        error.winerror = winerror
+                        raise error
+                    return replace(source, destination)
+
+                with patch.object(worker.os, "replace", side_effect=transient):
+                    if locked_phase == "rollback":
+                        with self.assertRaises(PermissionError):
+                            worker._promote_runtime(staged, final)
+                    else:
+                        try:
+                            worker._promote_runtime(staged, final)
+                        except OSError as error:
+                            self.fail(f"Transient WinError {winerror} aborted a recoverable installation: {error}")
+                expected = "previous" if locked_phase == "rollback" else "replacement"
+                self.assertEqual((final / "identity").read_text(), expected)
+
+    @contextmanager
+    def runtime_activation_case(self):
+        """Keep real staging/verification/rollback; replace only pip and native imports."""
+        worker = self.load_worker()
+        data = Path(tempfile.mkdtemp(prefix="activation-", dir=self.tmp.name))
+        root, final = data / "Runtime", data / "Runtime/asr"
+        self.populate_runtime(worker, final, "asr")
+        (final / "identity").write_text("previous")
+        sites = []
+
+        def execute(command, env=None, timeout=None):
+            if "install" in command:
+                site = Path(command[command.index("--target") + 1])
+                sites.append(site)
+                self.populate_runtime(worker, site.parent, "asr")
+                (site.parent / "identity").write_text("replacement")
+                return subprocess.CompletedProcess(command, 0, "", "")
+            return self.probe_success(command, hardware_ready=False)
+
+        with ExitStack() as stack:
+            for name, value in {"DATA_DIR": data, "CACHE_DIR": data / "Cache",
+                                "VOICE_DIR": data / "Voices", "MODEL_DIR": data / "Models",
+                                "CLONE_OUTPUT_DIR": data / "out/Clone",
+                                "SEPARATION_OUTPUT_DIR": data / "out/Separation",
+                                "RUNTIME_DIR": root, "ASR_RUNTIME_DIR": final,
+                                "ASR_SITE": final / "site-packages"}.items():
+                stack.enter_context(patch.object(worker, name, value))
+            stack.enter_context(patch.object(worker, "_resolve_pypi_endpoint_order",
+                                            return_value=[worker.PYPI_OFFICIAL, "https://second.example/simple"]))
+            stack.enter_context(patch.object(worker, "gpu_lock", return_value=nullcontext()))
+            stack.enter_context(patch.object(worker, "run_capture", side_effect=execute))
+            stack.enter_context(patch.object(worker, "probe_ffmpeg", side_effect=self.valid_ffmpeg))
+            stack.enter_context(patch("media_tools.probe_ffmpeg", side_effect=self.valid_ffmpeg))
+            yield worker, final, sites
+
+    def install_asr_for_test(self, worker):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = worker.cmd_runtime_install(worker.build_parser().parse_args(
+                ["runtime-install", "asr", "--repair", "--source", "official"]))
+        return code, json.loads(output.getvalue().splitlines()[-1])
+
+    def test_activation_error_keeps_verified_stage_without_retrying_download_sources(self):
+        with self.runtime_activation_case() as (worker, final, sites):
+            replace = os.replace
+
+            def deny_activation(source, destination):
+                if Path(source).parent.name == ".spp-install-staging" and Path(destination) == final:
+                    raise PermissionError("directory is busy")
+                return replace(source, destination)
+
+            with patch.object(worker.os, "replace", side_effect=deny_activation):
+                code, result = self.install_asr_for_test(worker)
+            self.assertEqual(code, 4)
+            self.assertEqual(len(sites), 1, "A local activation failure must not reinstall from another mirror")
+            self.assertEqual(result.get("phase"), "activate")
+            self.assertEqual(result.get("error_code"), "runtime_activation_blocked")
+            self.assertEqual(Path(result["staging_path"]), sites[0].parent)
+            self.assertTrue(sites[0].is_dir(), "Keep the already verified installation for retry")
+            self.assertEqual((final / "identity").read_text(), "previous")
+
+    def test_repair_reuses_verified_stage_after_activation_becomes_available(self):
+        with self.runtime_activation_case() as (worker, final, sites):
+            replace = os.replace
+
+            def deny_activation(source, destination):
+                if Path(source).parent.name == ".spp-install-staging" and Path(destination) == final:
+                    raise PermissionError("directory is busy")
+                return replace(source, destination)
+
+            with patch.object(worker.os, "replace", side_effect=deny_activation):
+                self.install_asr_for_test(worker)
+            code, result = self.install_asr_for_test(worker)
+            self.assertEqual(code, 0)
+            self.assertTrue(result["runtime_health"]["healthy"])
+            self.assertEqual(len(sites), 1, "Retry must activate the saved installation without pip downloading again")
+            self.assertEqual((final / "identity").read_text(), "replacement")
+            self.assertFalse(sites[0].parent.exists())
+
+    def test_failed_rollback_preserves_both_previous_runtime_and_prepared_stage(self):
+        with self.runtime_activation_case() as (worker, final, sites):
+            replace = os.replace
+
+            def deny_destination(source, destination):
+                if Path(destination) == final:
+                    raise PermissionError("destination unavailable")
+                return replace(source, destination)
+
+            with patch.object(worker.os, "replace", side_effect=deny_destination):
+                code, result = self.install_asr_for_test(worker)
+            self.assertEqual(code, 4)
+            self.assertEqual(len(sites), 1)
+            self.assertTrue(sites[0].is_dir(), "Rollback failure must not delete the prepared installation")
+            backups = list(final.parent.glob(".asr-runtime-previous-*"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual((backups[0] / "identity").read_text(), "previous")
+            self.assertIn(str(backups[0]), result["error"])
+            self.assertIn(str(sites[0].parent), result["error"])
+
+    def test_pending_repair_preserves_stage_when_lock_file_access_is_denied(self):
+        with self.runtime_activation_case() as (worker, final, sites):
+            replace = os.replace
+
+            def deny_activation(source, destination):
+                if Path(source).parent.name == ".spp-install-staging" and Path(destination) == final:
+                    raise PermissionError("directory is busy")
+                return replace(source, destination)
+
+            with patch.object(worker.os, "replace", side_effect=deny_activation):
+                self.install_asr_for_test(worker)
+            denied = PermissionError("gpu.lock access denied")
+            denied.winerror = 5
+            with patch.object(worker, "gpu_lock", side_effect=denied):
+                code, result = self.install_asr_for_test(worker)
+            self.assertEqual(code, 4)
+            self.assertEqual(result.get("error_code"), "runtime_activation_blocked")
+            self.assertEqual(result.get("winerror"), 5)
+            self.assertTrue(sites[0].is_dir())
+            self.assertEqual(len(sites), 1)
+            self.assertEqual((final / "identity").read_text(), "previous")
+
+    def test_interrupted_activation_can_resume_without_redownloading(self):
+        with self.runtime_activation_case() as (worker, final, sites):
+            replace = os.replace
+
+            def interrupt_activation(source, destination):
+                if Path(source).parent.name == ".spp-install-staging" and Path(destination) == final:
+                    raise KeyboardInterrupt("worker interrupted after backing up the old runtime")
+                return replace(source, destination)
+
+            with patch.object(worker.os, "replace", side_effect=interrupt_activation):
+                with self.assertRaises(KeyboardInterrupt):
+                    self.install_asr_for_test(worker)
+            self.assertEqual(len(list(final.parent.glob(".asr-runtime-previous-*"))), 1)
+            code, result = self.install_asr_for_test(worker)
+            self.assertEqual(code, 0)
+            self.assertTrue(result["runtime_health"]["healthy"])
+            self.assertEqual(len(sites), 1, "An interrupted commit must leave enough state to resume")
+
+    def test_repair_does_not_reuse_damaged_or_mislabeled_staging(self):
+        for corruption in ("missing_module", "wrong_runtime"):
+            with self.subTest(corruption=corruption), self.runtime_activation_case() as (worker, final, sites):
+                replace = os.replace
+
+                def deny_activation(source, destination):
+                    if Path(source).parent.name == ".spp-install-staging" and Path(destination) == final:
+                        raise PermissionError("directory is busy")
+                    return replace(source, destination)
+
+                with patch.object(worker.os, "replace", side_effect=deny_activation):
+                    self.install_asr_for_test(worker)
+                staged = sites[0].parent
+                if corruption == "missing_module":
+                    (sites[0] / "ctranslate2").rmdir()
+                else:
+                    marker = json.loads((staged / "installed.json").read_text(encoding="utf-8"))
+                    marker["runtime"] = "qwen"
+                    (staged / "installed.json").write_text(json.dumps(marker), encoding="utf-8")
+                code, result = self.install_asr_for_test(worker)
+                self.assertEqual(code, 0)
+                self.assertTrue(result["runtime_health"]["healthy"])
+                self.assertEqual(len(sites), 2, "Invalid cached data must go through a fresh verified install")
 
     def test_missing_gpu_does_not_mark_runtime_for_repair(self):
         worker = self.load_worker()
