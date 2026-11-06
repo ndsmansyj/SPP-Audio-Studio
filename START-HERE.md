@@ -7,7 +7,7 @@
 | Windows 10 / 11 x64 | **1.0.3** | [完整便携 ZIP](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/download/v1.0.3/SPPAudioStudio-1.0.3-win-x64.zip) · [Release / SHA-256](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/tag/v1.0.3) |
 | macOS 14+ Apple Silicon | **1.0.2** | [DMG](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/download/v1.0.2/SPP-Audio-Studio-1.0.2.dmg) |
 
-Windows 请完整解压到新目录，运行根目录的 `SPP Audio Studio.exe`。原有模型、模板和历史保存在用户数据目录；不要复制旧版 `app/` 或 `worker/` 覆盖新版文件。
+Windows 请完整解压到新目录，运行根目录的 `SPP Audio Studio.exe`。用户数据目录中的模型、模板和历史会保留；不要复制旧版 `app/` 或 `worker/` 覆盖新版文件。如果此前选择了便携模型存储，请保留旧目录，并在「模型与环境」中链接原有模型文件夹；旧目录下的 `out/` 输出也请保留。
 
 ## 使用与排障
 
