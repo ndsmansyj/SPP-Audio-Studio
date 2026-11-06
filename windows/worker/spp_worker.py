@@ -260,8 +260,12 @@ def _verification_script(kind: str) -> str:
 """
     return ("import json, os, sys\n" + imports[kind] + "\n"
             + f"KIND = {kind!r}\n"
-            + "hardware = {'ready': False, 'reason': ''}\ntry:\n" + hardware
-            + "    hardware['ready'] = True\n"
+            + "hardware = {'ready': False, 'reason': '', 'status': 'unavailable'}\ntry:\n"
+            + "    if os.environ.get('SPP_RUNTIME_PROBE_GPU', '1') != '1':\n"
+            + "        hardware['status'] = 'busy'\n"
+            + "        raise RuntimeError('GPU 正在执行任务，任务结束后可重新检查硬件；运行环境无需重装')\n"
+            + hardware
+            + "    hardware.update(ready=True, status='ready')\n"
             + "except Exception as exc:\n    hardware['reason'] = str(exc)\n"
             + "print('SPP_RUNTIME_PROBE=' + json.dumps({'hardware': hardware, "
               "'python_abi': f'{sys.version_info.major}.{sys.version_info.minor}', "
@@ -332,13 +336,13 @@ def _runtime_health(kind: str) -> dict:
     return health
 
 
-def _live_runtime_health(kind: str, health: dict) -> dict:
+def _live_runtime_health(kind: str, health: dict, probe_gpu: bool = True, gpu_locked: bool = False) -> dict:
     if not health["healthy"]:
         return health
     site = {"qwen": QWEN_SITE, "mel": MEL_SITE, "asr": ASR_SITE}[kind]
     result = dict(health)
     try:
-        proc = _verify_python_import(kind, site)
+        proc = _verify_python_import(kind, site, probe_gpu=probe_gpu, gpu_locked=gpu_locked)
         if proc.returncode:
             raise ValueError((proc.stderr or proc.stdout or "组件导入失败")[-1000:])
         result.update(_probe_result(proc), reason="组件导入与安装指纹检查通过")
@@ -347,11 +351,25 @@ def _live_runtime_health(kind: str, health: dict) -> dict:
     return result
 
 
+def _doctor_runtime_health(health: dict) -> dict:
+    def check(probe_gpu: bool) -> dict:
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            values = pool.map(lambda item: _live_runtime_health(*item, probe_gpu=probe_gpu, gpu_locked=probe_gpu), health.items())
+            return dict(zip(health, values))
+    if not any(item["healthy"] for item in health.values()):
+        return health
+    try:
+        # Hold one lock for the diagnostic group; a running clone/separation
+        # keeps exclusive GPU access. Import-only checks do not allocate CUDA tensors.
+        with gpu_lock(timeout=0.2):
+            return check(True)
+    except TimeoutError:
+        return check(False)
+
+
 def cmd_doctor(_: argparse.Namespace) -> int:
     env = resolve_environment()
-    health = env["runtime_health"]
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        health = dict(zip(health, pool.map(lambda item: _live_runtime_health(*item), health.items())))
+    health = _doctor_runtime_health(env["runtime_health"])
     ffmpeg = media_tool_status()
     mel_model_dir = Path(env["mel_model_dir"])
     qwen_model = Path(env["qwen_model"])
@@ -978,8 +996,10 @@ def _resolve_pytorch_endpoint_order(source: str, runtime: str) -> list[str]:
     return order
 
 
-def _verify_python_import(kind: str, site: Path) -> subprocess.CompletedProcess:
-    env = {"PYTHONPATH": str(site), "PYTHONNOUSERSITE": "1"}
+def _verify_python_import(kind: str, site: Path, probe_gpu: bool = True,
+                          gpu_locked: bool = False) -> subprocess.CompletedProcess:
+    env = {"PYTHONPATH": str(site), "PYTHONNOUSERSITE": "1",
+           "SPP_RUNTIME_PROBE_GPU": "1" if probe_gpu else "0"}
     if kind == "asr":
         for root in (QWEN_RUNTIME_DIR, MEL_RUNTIME_DIR):
             dll_dir = root / "site-packages" / "torch" / "lib"
@@ -987,6 +1007,13 @@ def _verify_python_import(kind: str, site: Path) -> subprocess.CompletedProcess:
                 env["SPP_ASR_CUDA_DLL_DIR"] = str(dll_dir)
                 env["PATH"] = str(dll_dir) + os.pathsep + os.environ.get("PATH", "")
                 break
+    if probe_gpu and not gpu_locked:
+        # Also applies to staging verification and the already-installed fast path.
+        try:
+            with gpu_lock(timeout=0.2):
+                return run_capture(_verify_command(kind, site), env, timeout=60)
+        except TimeoutError:
+            env["SPP_RUNTIME_PROBE_GPU"] = "0"
     return run_capture(_verify_command(kind, site), env, timeout=60)
 
 

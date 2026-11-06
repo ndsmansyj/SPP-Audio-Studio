@@ -529,7 +529,7 @@ class WorkerTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("win_worker_frozen_commands", WORKER)
         worker = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(worker)
-        release = Path(self.tmp.name) / "release"
+        release = Path(self.tmp.name).resolve() / "release"
         python_core = release / "python-core/python.exe"
         worker_exe = str(release / "worker/SPPWorker/SPPWorker.exe")
         with patch.object(worker, "IS_FROZEN", True), \
@@ -579,7 +579,7 @@ class WorkerTests(unittest.TestCase):
         import importlib.util
         spec = importlib.util.spec_from_file_location("win_worker_frozen_core", WORKER)
         worker = importlib.util.module_from_spec(spec)
-        release = Path(self.tmp.name) / "release"
+        release = Path(self.tmp.name).resolve() / "release"
         worker_exe = str(release / "worker/SPPWorker/SPPWorker.exe")
         with patch.object(sys, "frozen", True, create=True), \
              patch.object(sys, "executable", worker_exe), \
@@ -803,6 +803,7 @@ class WorkerTests(unittest.TestCase):
              patch.object(worker, "_runtime_installed", return_value=True) as installed, \
              patch.object(worker, "_resolve_pypi_endpoint_order", return_value=[worker.PYPI_OFFICIAL]), \
              patch.object(worker, "_resolve_pytorch_endpoint_order", return_value=[worker.PYTORCH_CUDA_OFFICIAL]), \
+             patch.object(worker, "gpu_lock", return_value=nullcontext()), \
              patch.object(worker, "run_capture", side_effect=fake_run):
             code = worker.cmd_runtime_install(worker.build_parser().parse_args(["runtime-install", "qwen", "--repair"]))
         self.assertEqual(code, 4)
@@ -860,6 +861,50 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(env["qwen_python_source"], "linked")
         self.assertFalse(env["runtime_health"]["qwen"]["healthy"])
         self.assertIn("外部", env["runtime_health"]["qwen"]["reason"])
+
+    def test_doctor_busy_gpu_keeps_installation_healthy_and_skips_cuda_probe(self):
+        worker = self.load_worker()
+        health = {"qwen": {"installed": True, "healthy": True, "status": "ready", "reason": "ok"}}
+        captured = []
+        def verify(kind, site, **kwargs):
+            captured.append(kwargs)
+            self.assertFalse(kwargs["probe_gpu"])
+            result = self.probe_success([], hardware_ready=False)
+            report = worker._probe_result(result)
+            report["hardware"].update(status="busy", reason="GPU 正在执行任务")
+            return subprocess.CompletedProcess([], 0, "SPP_RUNTIME_PROBE=" + json.dumps(report), "")
+        with patch.object(worker, "gpu_lock", side_effect=TimeoutError("busy")), \
+             patch.object(worker, "_verify_python_import", side_effect=verify):
+            result = worker._doctor_runtime_health(health)
+        self.assertTrue(result["qwen"]["healthy"])
+        self.assertEqual(result["qwen"]["hardware"]["status"], "busy")
+        self.assertEqual(len(captured), 1)
+
+    def test_staging_verification_skips_cuda_when_gpu_is_busy(self):
+        worker = self.load_worker()
+        with patch.object(worker, "gpu_lock", side_effect=TimeoutError("busy")), \
+             patch.object(worker, "run_capture", return_value=self.probe_success([], False)) as run:
+            result = worker._verify_python_import("qwen", Path(self.tmp.name) / "site-packages")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(run.call_args.args[1]["SPP_RUNTIME_PROBE_GPU"], "0")
+        self.assertEqual(run.call_args.kwargs["timeout"], 60)
+        self.assertIn("qwen_tts", run.call_args.args[0][2])
+
+    def test_runtime_probe_distinguishes_gpu_busy_and_missing_without_failing_imports(self):
+        worker = self.load_worker()
+        modules = {name: ModuleType(name) for name in ("qwen_tts", "torch", "torchaudio", "soundfile", "imageio_ffmpeg")}
+        modules["imageio_ffmpeg"].get_ffmpeg_exe = lambda: "ffmpeg.exe"
+        calls = []
+        modules["torch"].cuda = type("Cuda", (), {"is_available": staticmethod(lambda: calls.append("cuda") or False)})()
+        for probe_gpu, expected_status in (("0", "busy"), ("1", "unavailable")):
+            calls.clear()
+            with self.subTest(probe_gpu=probe_gpu), patch.dict(sys.modules, modules), \
+                 patch.dict(os.environ, {"SPP_RUNTIME_PROBE_GPU": probe_gpu}), patch("builtins.print") as output:
+                exec(compile(worker._verification_script("qwen"), "<probe>", "exec"), {})
+            report = json.loads(output.call_args.args[0].split("=", 1)[1])
+            self.assertFalse(report["hardware"]["ready"])
+            self.assertEqual(report["hardware"]["status"], expected_status)
+            self.assertEqual(calls, [] if probe_gpu == "0" else ["cuda"])
 
     def test_runtime_requirement_documents_match_manifest(self):
         self.load_worker()
