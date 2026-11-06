@@ -147,8 +147,10 @@ try {
         Copy-Item $pipMetadata[0].FullName $coreSitePackages -Recurse -Force
         # Avoid generated pyc files changing the audited distribution on first launch.
         Get-ChildItem $pythonCore -Directory -Recurse -Filter '__pycache__' | Remove-Item -Recurse -Force
-        Invoke-Native (Join-Path $pythonCore 'python.exe') '-B' '-I' '-c' 'import ssl, sqlite3, ctypes, pip; print(pip.__version__)'
-        Invoke-Native (Join-Path $pythonCore 'python.exe') '-B' '-I' '-m' 'pip' '--version'
+        # Isolated mode ignores PYTHONIOENCODING. Use the same UTF-8 contract
+        # as worker subprocesses, including repositories with Chinese paths.
+        Invoke-Native (Join-Path $pythonCore 'python.exe') '-B' '-I' '-X' 'utf8' '-c' 'import ssl, sqlite3, ctypes, pip; print(pip.__version__)'
+        Invoke-Native (Join-Path $pythonCore 'python.exe') '-B' '-I' '-X' 'utf8' '-m' 'pip' '--version'
     }
 
     $commit = 'unknown'
