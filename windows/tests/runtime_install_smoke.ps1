@@ -99,8 +99,10 @@ function Invoke-SmokeCommand([string]$Name, [string]$Executable, [string[]]$Argu
     }
 }
 
-function Invoke-Repair([string]$Name, [int]$TimeoutSeconds = 1800) {
-    $run = Invoke-SmokeCommand $Name $worker @('runtime-install', 'asr', '--repair', '--source', 'official') $TimeoutSeconds
+function Invoke-Repair([string]$Name, [int]$TimeoutSeconds = 480, [switch]$CheckExisting) {
+    $arguments = @('runtime-install', 'asr', '--source', 'official')
+    if (-not $CheckExisting) { $arguments += '--repair' }
+    $run = Invoke-SmokeCommand $Name $worker $arguments $TimeoutSeconds
     $messages = @(
         foreach ($line in ($run.Stdout -split '\r?\n')) {
             if ($line.TrimStart().StartsWith('{')) { $line | ConvertFrom-Json -AsHashtable }
@@ -214,7 +216,14 @@ namespace SPPRuntimeSmoke {
     $resumed.Step['savedStageActivated'] = $true
     $resumed.Step['userDataPreserved'] = $true
 
-    $ffmpeg = Invoke-SmokeCommand '04-managed-ffmpeg' (Join-Path $asrRoot 'ffmpeg/ffmpeg.exe') @('-version') 30
+    # The no-repair fast path performs live imports from the final directory.
+    $existing = Invoke-Repair '04-final-runtime-import' 90 -CheckExisting
+    Assert-Smoke ($existing.ExitCode -eq 0 -and $existing.Result.ok -eq $true) 'The activated ASR runtime failed its live import check.'
+    Assert-Smoke ($existing.Result.already_installed -eq $true) 'Checking the activated runtime unexpectedly required another installation.'
+    Assert-Smoke ($existing.Result.runtime_health.healthy -eq $true -and $existing.Starts -eq 0) 'The activated ASR runtime is not healthy without reinstalling.'
+    $existing.Step['liveImportsFromFinalDirectory'] = $true
+
+    $ffmpeg = Invoke-SmokeCommand '05-managed-ffmpeg' (Join-Path $asrRoot 'ffmpeg/ffmpeg.exe') @('-version') 30
     Assert-Smoke ($ffmpeg.ExitCode -eq 0 -and $ffmpeg.Stdout -match 'ffmpeg version') 'The activated managed FFmpeg binary did not run successfully.'
     $evidence['ok'] = $true
 } catch {
