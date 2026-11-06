@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import pathlib
 import re
 import subprocess
@@ -25,14 +27,16 @@ class WindowsPackagingTests(unittest.TestCase):
             "global.json",
             "toolchain.json",
             "requirements-build.txt",
-            "ci/windows.yml",
+            "ci/verify_portable.py",
         ]
         missing = [name for name in required if not (WINDOWS / name).is_file()]
         self.assertEqual([], missing)
 
+    @unittest.skipIf(os.name != "nt" and shutil.which("powershell.exe") is None, "Windows PowerShell is unavailable on this non-Windows host")
     def test_powershell_files_parse(self) -> None:
         powershell = "powershell.exe"
-        for script in WINDOWS.glob("*.ps1"):
+        scripts = list(WINDOWS.glob("*.ps1")) + list((WINDOWS / "ci").glob("*.ps1")) + list((WINDOWS / "tests").glob("*.ps1"))
+        for script in scripts:
             command = (
                 "$e=$null; $t=$null; "
                 f"[void][System.Management.Automation.Language.Parser]::ParseFile('{script}',[ref]$t,[ref]$e); "
@@ -131,6 +135,7 @@ class WindowsPackagingTests(unittest.TestCase):
         for disabled_property in ("EnableCoreMrtTooling", "AppxGeneratePriEnabled", "IncludeProjectPriFile"):
             self.assertNotIn(disabled_property, project)
 
+    @unittest.skipIf(os.name != "nt" and shutil.which("powershell.exe") is None, "Windows PowerShell is unavailable on this non-Windows host")
     def test_vswhere_discovery_survives_missing_programfiles_x86_env(self) -> None:
         common = WINDOWS / "common.ps1"
         command = (
@@ -162,7 +167,7 @@ class WindowsPackagingTests(unittest.TestCase):
         build = (WINDOWS / "build.ps1").read_text(encoding="utf-8")
         publish = (WINDOWS / "publish.ps1").read_text(encoding="utf-8")
         self.assertIn('"/p:OutputPath=$output"', build)
-        self.assertIn('"/p:PublishDir=$appOutput"', publish)
+        self.assertIn('"/p:PublishDir=$($appOutput.Replace(', publish)
         self.assertNotIn('"/p:OutputPath=$output\\"', build)
         self.assertNotIn('"/p:PublishDir=$appOutput\\"', publish)
 

@@ -3,7 +3,7 @@ param(
     [ValidateSet('x64', 'arm64')][string]$Platform = 'x64',
     [string]$Project,
     [string]$WorkerEntryPoint,
-    [string]$Version = '0.0.0-dev',
+    [string]$Version,
     [switch]$NoRestore,
     [switch]$SkipWorker,
     [switch]$NoArchive
@@ -14,11 +14,19 @@ Assert-Command 'dotnet' 'Run windows/bootstrap.ps1 -InstallMissing.'
 $appProject = Resolve-AppProject $Project
 $msbuild = Get-VsMsBuildPath
 $runtime = "win-$Platform"
-$publishRoot = Join-Path $RepoRoot 'SPP Audio Studio'
+if ($Platform -ne 'x64') { throw 'The portable Python distribution currently supports x64 only.' }
+[xml]$projectXml = Get-Content $appProject -Raw
+$sourceVersion = @($projectXml.Project.PropertyGroup.Version | Where-Object { $_ })[0].ToString()
+if (-not $Version) { $Version = $sourceVersion }
+if ($Version -ne $sourceVersion) { throw "Requested version $Version differs from source version $sourceVersion." }
+if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid release version: $Version" }
+$destinationRoot = Join-Path $RepoRoot 'SPP Audio Studio'
+$stageParent = Join-Path $ArtifactsRoot ("staging/" + [Guid]::NewGuid().ToString('N'))
+$publishRoot = Join-Path $stageParent 'SPP Audio Studio'
 $appOutput = Join-Path $publishRoot 'app'
 $workerOutput = Join-Path $publishRoot 'worker'
 $packageRoot = Join-Path $ArtifactsRoot 'packages'
-Reset-Directory $publishRoot
+New-Item $publishRoot -ItemType Directory -Force | Out-Null
 New-Item $appOutput -ItemType Directory -Force | Out-Null
 New-Item $packageRoot -ItemType Directory -Force | Out-Null
 
@@ -30,7 +38,10 @@ try {
         '/p:Configuration=Release',
         "/p:Platform=$Platform",
         "/p:RuntimeIdentifier=$runtime",
-        "/p:PublishDir=$appOutput",
+        # A forward slash preserves the directory separator through native quoting.
+        "/p:PublishDir=$($appOutput.Replace('\', '/'))/",
+        "/p:Version=$Version",
+        "/p:FileVersion=$Version.0",
         '/p:WindowsPackageType=None',
         '-p:WindowsAppSDKSelfContained=true',
         '/p:SelfContained=true',
@@ -52,7 +63,7 @@ try {
     $vsInstallation = Get-VsInstallationPath -RequireUniversalBuildTools
     $vsDevCmd = Join-Path $vsInstallation 'Common7\Tools\VsDevCmd.bat'
     if (-not (Test-Path $vsDevCmd -PathType Leaf)) { throw "VsDevCmd.bat not found: $vsDevCmd" }
-    $launcherCommand = "call `"$vsDevCmd`" -arch=$Platform -host_arch=x64 >nul && pushd `"$launcherSourceRoot`" && rc.exe /nologo /fo`"$launcherRes`" launcher.rc && cl.exe /nologo /O2 /MT /EHsc /std:c++17 /utf-8 /DUNICODE /D_UNICODE launcher.cpp `"$launcherRes`" /link /SUBSYSTEM:WINDOWS user32.lib /OUT:`"$launcherExe`""
+    $launcherCommand = "call `"$vsDevCmd`" -arch=$Platform -host_arch=x64 >nul && pushd `"$launcherSourceRoot`" && rc.exe /nologo /fo`"$launcherRes`" launcher.rc && cl.exe /nologo /O2 /MT /EHsc /std:c++17 /utf-8 /DUNICODE /D_UNICODE launcher.cpp /Fo`"$(Join-Path $launcherWork 'launcher.obj')`" `"$launcherRes`" /link /SUBSYSTEM:WINDOWS user32.lib /OUT:`"$launcherExe`""
     Invoke-Native 'cmd.exe' '/d' '/s' '/c' $launcherCommand
 
     $converterProject = Join-Path $PSScriptRoot 'src\FormatConverter\FormatConverter.csproj'
@@ -72,6 +83,7 @@ try {
         # SPPWorker.exe is only the command/UI host. AI runtimes run in the
         # portable CPython core below, so the frozen worker does not carry a
         # duplicate stdlib or pip/ML bridge payload.
+        Invoke-Native $venvPython '-c' 'import sys, struct; assert sys.version_info[:2] == (3, 11); assert struct.calcsize(chr(80)) == 8'
         $pythonBase = (& $venvPython -c 'import sys; print(sys.base_prefix)').Trim()
         if (-not $pythonBase) { throw 'Unable to resolve the build Python base prefix.' }
         $stdlibSource = Join-Path $pythonBase 'Lib'
@@ -85,11 +97,10 @@ try {
                 Copy-Item $source (Join-Path $workerOutput $name) -Recurse -Force
             }
         }
-        foreach ($name in @('qwen_bridge.py', 'mel_bridge.py', 'local_api.py')) {
-            $source = Join-Path $workerRoot $name
-            if (Test-Path $source -PathType Leaf) {
-                Copy-Item $source (Join-Path $workerOutput $name) -Force
-            }
+        # Copy the bridge modules and their data together; e.g. 'local_api.py'
+        # imports the same media resolver used by the frozen worker.
+        Get-ChildItem $workerRoot -File | Where-Object { $_.Extension -in @('.py', '.json') } | ForEach-Object {
+            Copy-Item $_.FullName (Join-Path $workerOutput $_.Name) -Force
         }
 
         $agentLauncherSource = Join-Path $workerRoot 'start_agent_api.cmd'
@@ -111,9 +122,8 @@ try {
         New-Item $pythonCore -ItemType Directory -Force | Out-Null
         foreach ($name in @('python.exe', 'python3.dll', 'python311.dll', 'vcruntime140.dll', 'vcruntime140_1.dll')) {
             $source = Join-Path $pythonBase $name
-            if (Test-Path $source -PathType Leaf) {
-                Copy-Item $source $pythonCore -Force
-            }
+            if (-not (Test-Path $source -PathType Leaf)) { throw "Required Python runtime file missing: $source" }
+            Copy-Item $source $pythonCore -Force
         }
         $coreLib = Join-Path $pythonCore 'Lib'
         $coreDll = Join-Path $pythonCore 'DLLs'
@@ -132,6 +142,15 @@ try {
             throw "pip package not found in build venv: $corePip"
         }
         Copy-Item $corePip (Join-Path $coreSitePackages 'pip') -Recurse -Force
+        $pipMetadata = @(Get-ChildItem (Split-Path $corePip -Parent) -Directory -Filter 'pip-*.dist-info')
+        if ($pipMetadata.Count -ne 1) { throw 'Expected exactly one pip distribution metadata directory.' }
+        Copy-Item $pipMetadata[0].FullName $coreSitePackages -Recurse -Force
+        # Avoid generated pyc files changing the audited distribution on first launch.
+        Get-ChildItem $pythonCore -Directory -Recurse -Filter '__pycache__' | Remove-Item -Recurse -Force
+        # Isolated mode ignores PYTHONIOENCODING. Use the same UTF-8 contract
+        # as worker subprocesses, including repositories with Chinese paths.
+        Invoke-Native (Join-Path $pythonCore 'python.exe') '-B' '-I' '-X' 'utf8' '-c' 'import ssl, sqlite3, ctypes, pip; print(pip.__version__)'
+        Invoke-Native (Join-Path $pythonCore 'python.exe') '-B' '-I' '-X' 'utf8' '-m' 'pip' '--version'
     }
 
     $commit = 'unknown'
@@ -147,11 +166,13 @@ try {
         [ordered]@{ path = $relative; size = $_.Length; sha256 = $hash }
     })
     $releaseManifest = [ordered]@{
-        schemaVersion = 1
+        schemaVersion = 2
         version = $Version
         commit = $commit
         runtimeIdentifier = $runtime
-        portable = $true
+        portable = (-not $SkipWorker)
+        sourceBuild = $true
+        gpuInferenceValidated = $false
         generatedAtUtc = [DateTime]::UtcNow.ToString('o')
         files = $manifestFiles
     }
@@ -159,22 +180,39 @@ try {
     $releaseManifest | ConvertTo-Json -Depth 6 | Set-Content $manifestPath -Encoding UTF8
 
     $checksumPath = Join-Path $publishRoot 'SHA256SUMS'
-    $checksumLines = @(Get-ChildItem $publishRoot -File -Recurse | Where-Object Name -ne 'SHA256SUMS' | Sort-Object FullName | ForEach-Object {
+    $checksumLines = @(Get-ChildItem $publishRoot -File -Recurse | Where-Object FullName -ne $checksumPath | Sort-Object FullName | ForEach-Object {
         $relative = $_.FullName.Substring($publishRoot.Length + 1).Replace('\', '/')
         "{0} *{1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $relative
     })
-    [IO.File]::WriteAllText($checksumPath, ($checksumLines -join "`n") + "`n", [Text.Encoding]::ASCII)
+    [IO.File]::WriteAllText($checksumPath, ($checksumLines -join "`n") + "`n", [Text.UTF8Encoding]::new($false))
+
+    $verifier = Join-Path $PSScriptRoot 'ci/verify_portable.py'
+    if (-not $SkipWorker) { Invoke-Python $verifier '--root' $publishRoot '--version' $Version '--commit' $commit }
 
     if (-not $NoArchive) {
         $archive = Join-Path $packageRoot "SPPAudioStudio-$Version-$runtime.zip"
-        if (Test-Path $archive) { Remove-Item $archive -Force }
-        Compress-Archive -Path $publishRoot -DestinationPath $archive -CompressionLevel Optimal
+        $temporaryArchive = Join-Path $stageParent ([IO.Path]::GetFileName($archive))
+        Compress-Archive -Path $publishRoot -DestinationPath $temporaryArchive -CompressionLevel Optimal
+        if (-not $SkipWorker) { Invoke-Python $verifier '--zip' $temporaryArchive '--version' $Version '--commit' $commit }
+        Move-Item $temporaryArchive $archive -Force
         $archiveHash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
         [IO.File]::WriteAllText("$archive.sha256", "$archiveHash *$([IO.Path]::GetFileName($archive))`n", [Text.Encoding]::ASCII)
         Write-Host "Portable archive: $archive"
     }
 
-    Write-Host "Publish complete: $publishRoot"
+    # Keep the previous working folder until every build and integrity check passes.
+    $backupRoot = "$destinationRoot.previous"
+    if (Test-Path $backupRoot) { Remove-Item $backupRoot -Recurse -Force }
+    if (Test-Path $destinationRoot) { Move-Item $destinationRoot $backupRoot }
+    try {
+        Move-Item $publishRoot $destinationRoot
+    } catch {
+        if (Test-Path $backupRoot) { Move-Item $backupRoot $destinationRoot }
+        throw
+    }
+    if (Test-Path $backupRoot) { Remove-Item $backupRoot -Recurse -Force }
+    Write-Host "Publish complete: $destinationRoot"
 } finally {
     Pop-Location
+    if (Test-Path $stageParent) { Remove-Item $stageParent -Recurse -Force }
 }

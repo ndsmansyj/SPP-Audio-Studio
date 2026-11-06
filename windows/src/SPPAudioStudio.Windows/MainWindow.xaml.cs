@@ -1,6 +1,7 @@
 using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
@@ -84,6 +85,18 @@ public sealed partial class MainWindow : Window
     private Button? _inlinePlayerButton;
     private string _lastDoctorJson = "";
     private string _lastModelStatusJson = "";
+    private TextBlock? _diagnosticsStatus;
+    private readonly SemaphoreSlim _clipboardGate = new(1, 1);
+    private TextBlock? _environmentStatus;
+    private Task _environmentRefreshTask = Task.CompletedTask;
+    private int _environmentRefreshes;
+    private string? _lastEnvironmentError;
+    private bool _doctorReceived;
+    private bool _modelStatusReceived;
+    private readonly Dictionary<string, TextBlock> _capabilityLabels = [];
+    private readonly HashSet<string> _runtimeNeedsRepair = [];
+    private readonly List<Expander> _modelManualExpanders = [];
+    private readonly CancellationTokenSource? _smokeCancellation;
 
     private sealed class FileSelectionState
     {
@@ -158,8 +171,9 @@ public sealed partial class MainWindow : Window
     private static readonly SolidColorBrush PrimaryBrush = new(ColorHelper.FromArgb(255, 32, 33, 35));
     private static readonly SolidColorBrush TextBrush = new(ColorHelper.FromArgb(255, 32, 33, 35));
 
-    public MainWindow()
+    public MainWindow(bool smokeTest = false)
     {
+        if (smokeTest) _smokeCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(175));
         InitializeComponent();
         _navigation = NavigationRoot;
         _worker = CreateWorker();
@@ -168,7 +182,7 @@ public sealed partial class MainWindow : Window
         Title = "SPP Audio Studio";
         ConfigureWindow();
         BuildShell();
-        _ = RefreshWorkerStatusAsync();
+        if (!smokeTest) _ = RefreshWorkerStatusAsync();
     }
 
     private static IWorkerService CreateWorker()
@@ -177,13 +191,99 @@ public sealed partial class MainWindow : Window
         catch (WorkerUnavailableException error) { return new MissingWorkerService(error.Message); }
     }
 
+    internal async Task RunSmokeTestAsync()
+    {
+        var visited = new HashSet<string>();
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            if (_smokeCancellation is null) throw new InvalidOperationException("Smoke mode was not enabled at startup.");
+            var token = _smokeCancellation.Token;
+            while (Root.XamlRoot is null || Root.ActualWidth <= 0)
+                await Task.Delay(100, token);
+
+            for (var round = 0; round < 3; round++)
+            {
+                foreach (var tag in new[] { "workbench", "clone" })
+                {
+                    ShowPage(tag);
+                    visited.Add(tag);
+                    await WaitForSmokeLayoutAsync(token);
+                }
+
+                var alreadyCreated = _pageCache.ContainsKey("environment");
+                var previousRefreshes = _environmentRefreshes;
+                ShowPage("environment");
+                visited.Add("environment");
+                if (_environmentStatus is null) throw new InvalidOperationException("Environment page did not initialize.");
+                // The first visit starts the real refresh while building the page; later visits explicitly refresh it.
+                var refresh = alreadyCreated ? RefreshEnvironmentAsync(_environmentStatus, token) : _environmentRefreshTask;
+                await refresh.WaitAsync(token);
+                if (_lastEnvironmentError is not null) throw new InvalidOperationException(_lastEnvironmentError);
+                if (_environmentRefreshes <= previousRefreshes)
+                    throw new InvalidOperationException("Environment refresh did not complete.");
+
+                foreach (var expander in _modelManualExpanders) expander.IsExpanded = true;
+                await WaitForSmokeLayoutAsync(token);
+                var environmentPage = _pageCache["environment"];
+                environmentPage.ChangeView(null, environmentPage.ScrollableHeight, null, true);
+                await WaitForSmokeLayoutAsync(token);
+                environmentPage.ChangeView(null, 0, null, true);
+                foreach (var expander in _modelManualExpanders) expander.IsExpanded = false;
+                await WaitForSmokeLayoutAsync(token);
+            }
+
+            if (!_doctorReceived || !_modelStatusReceived || _environmentRefreshes < 3)
+                throw new InvalidOperationException("The worker did not provide all required responses.");
+            SmokeTestReport.WriteAndExit(new
+            {
+                ok = true,
+                appVersion = SmokeTestReport.AppVersion,
+                pagesVisited = visited.OrderBy(page => page).ToArray(),
+                environmentRefreshes = _environmentRefreshes,
+                doctorReceived = _doctorReceived,
+                modelStatusReceived = _modelStatusReceived,
+                elapsedSeconds = Math.Round(stopwatch.Elapsed.TotalSeconds, 2),
+                completedAt = DateTimeOffset.UtcNow
+            }, 0);
+        }
+        catch (Exception error)
+        {
+            SmokeTestReport.WriteAndExit(new
+            {
+                ok = false,
+                appVersion = SmokeTestReport.AppVersion,
+                pagesVisited = visited.OrderBy(page => page).ToArray(),
+                environmentRefreshes = _environmentRefreshes,
+                doctorReceived = _doctorReceived,
+                modelStatusReceived = _modelStatusReceived,
+                error = error.ToString(),
+                completedAt = DateTimeOffset.UtcNow
+            }, 1);
+        }
+    }
+
+    private async Task WaitForSmokeLayoutAsync(CancellationToken cancellationToken)
+    {
+        Root.UpdateLayout();
+        await Task.Delay(500, cancellationToken);
+        Root.UpdateLayout();
+        await Task.Delay(200, cancellationToken);
+    }
+
     private void ConfigureWindow()
     {
         var hwnd = WindowNative.GetWindowHandle(this);
         var id = Win32Interop.GetWindowIdFromWindow(hwnd);
         _appWindow = AppWindow.GetFromWindowId(id);
         _appWindow.Resize(new global::Windows.Graphics.SizeInt32(1980, 1600));
-        _appWindow.SetIcon(IOPath.Combine(AppContext.BaseDirectory, "Assets", "pixel_icon.ico"));
+        try
+        {
+            var iconPath = IOPath.Combine(AppContext.BaseDirectory, "Assets", "pixel_icon.ico");
+            if (File.Exists(iconPath)) _appWindow.SetIcon(iconPath);
+            else LogNonFatal("Window icon", new FileNotFoundException("Window icon is missing", iconPath));
+        }
+        catch (Exception error) { LogNonFatal("Window icon", error); }
         var titleBar = _appWindow.TitleBar;
         var titleBackground = ColorHelper.FromArgb(255, 247, 247, 248);
         var titleHover = ColorHelper.FromArgb(255, 235, 235, 238);
@@ -226,6 +326,7 @@ public sealed partial class MainWindow : Window
                 Background = new SolidColorBrush(Colors.Transparent),
                 BorderThickness = new Thickness(0)
             };
+            AutomationProperties.SetAutomationId(button, "Nav_" + tag);
             button.Click += (_, _) => ShowPage(tag);
             button.PointerEntered += (_, _) =>
             {
@@ -250,6 +351,7 @@ public sealed partial class MainWindow : Window
         Grid.SetColumn(pane, 0);
         _navigation.Children.Add(pane);
         _pageHost.HorizontalAlignment = HorizontalAlignment.Stretch;
+        AutomationProperties.SetAutomationId(_pageHost, "PageHost");
         _pageHost.VerticalAlignment = VerticalAlignment.Stretch;
         Grid.SetColumn(_pageHost, 1);
         _navigation.Children.Add(_pageHost);
@@ -1311,12 +1413,17 @@ public sealed partial class MainWindow : Window
         _modelLinkButtons.Clear();
         _runtimeStateLabels.Clear();
         _runtimeInstallButtons.Clear();
+        _capabilityLabels.Clear();
+        _modelManualExpanders.Clear();
         var page = Page("模型与环境", "本机模型与运行环境");
         var status = new TextBlock { Text = "正在检查本机 AI 环境…", Foreground = MutedBrush, TextWrapping = TextWrapping.Wrap };
+        _environmentStatus = status;
+        AutomationProperties.SetAutomationId(status, "EnvironmentCheckStatus");
         _environmentInstallNotice = NoticeCard("本机 AI 环境", "检测到缺失组件时，可在这里一键补齐。", "安装缺失组件", () => _ = InstallAllAsync(status));
         _environmentInstallNotice.Visibility = Visibility.Collapsed;
         page.Children.Add(_environmentInstallNotice);
         page.Children.Add(StatusStrip(status));
+        page.Children.Add(status);
         page.Children.Add(ModelStorageCard(status));
         var grid = new Grid { ColumnSpacing = 14 };
         grid.ColumnDefinitions.Add(new ColumnDefinition());
@@ -1346,7 +1453,9 @@ public sealed partial class MainWindow : Window
         source.Items.Add("自动测速（国内优先）"); source.Items.Add("HF 镜像"); source.Items.Add("Hugging Face 官方");
         source.SelectionChanged += (_, _) => _ = SetDownloadSourceAsync(source.SelectedIndex switch { 1 => "mirror", 2 => "official", _ => "auto" }, status);
         row.Children.Add(source);
-        row.Children.Add(ActionButton("刷新检查", () => _ = RefreshEnvironmentAsync(status)));
+        var refresh = ActionButton("刷新检查", () => _ = RefreshEnvironmentAsync(status));
+        AutomationProperties.SetAutomationId(refresh, "EnvironmentRefresh");
+        row.Children.Add(refresh);
         row.Children.Add(ActionButton("取消当前操作", CancelCurrentOperation));
         return Card(row, 16);
     }
@@ -1416,11 +1525,13 @@ public sealed partial class MainWindow : Window
         heading.Children.Add(new TextBlock { Text = title, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, FontSize = 16 });
         var state = new TextBlock { Text = "检查中…", Foreground = MutedBrush, VerticalAlignment = VerticalAlignment.Center };
         Grid.SetColumn(state, 1); heading.Children.Add(state); _modelStateLabels[key] = state;
+        AutomationProperties.SetAutomationId(state, "ModelState_" + key);
         body.Children.Add(heading);
         body.Children.Add(new TextBlock { Text = subtitle, Foreground = MutedBrush, FontSize = 12 });
         body.Children.Add(new TextBlock { Text = $"▣ {size}    {license}", Foreground = MutedBrush, FontSize = 12 });
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 9 };
         var download = PrimaryButton("下载模型", () => _ = RunEnvironmentCommandAsync("model-download", [key, "--source", _downloadSource], status));
+        AutomationProperties.SetAutomationId(download, "ModelDownload_" + key);
         download.Visibility = Visibility.Collapsed;
         _modelDownloadButtons[key] = download; buttons.Children.Add(download);
         var link = ActionButton("链接本地…", () => _ = LinkModelAsync(key, status));
@@ -1430,6 +1541,8 @@ public sealed partial class MainWindow : Window
         body.Children.Add(buttons);
 
         var manual = new Expander { Header = "手动下载 · 地址与存放目录" };
+        AutomationProperties.SetAutomationId(manual, "ModelManual_" + key);
+        _modelManualExpanders.Add(manual);
         var manualBody = new StackPanel { Spacing = 7 };
         manualBody.Children.Add(new TextBlock
         {
@@ -1487,17 +1600,19 @@ public sealed partial class MainWindow : Window
             catch (Exception error) { status.Text = "打开 Runtime 目录失败：" + error.Message; }
         }));
         runtimeControls.Children.Add(ActionButton("复制 Runtime 路径", () =>
-        {
-            var package = new DataPackage();
-            package.SetText(RuntimeDirectoryPath());
-            Clipboard.SetContent(package);
-            Clipboard.Flush();
-            status.Text = "已复制 Runtime 目录路径";
-        }));
+            _ = CopyTextAsync(RuntimeDirectoryPath(), status, "已复制 Runtime 目录路径")));
         body.Children.Add(runtimeControls);
         body.Children.Add(RuntimeRow("Qwen Runtime", "qwen_python", status));
         body.Children.Add(RuntimeRow("Mel Separator", "separator", status));
         body.Children.Add(RuntimeRow("Whisper ASR（可选）", "asr_python", status));
+        body.Children.Add(SectionTitle("功能状态"));
+        foreach (var (key, label) in new[] { ("format_conversion", "格式转换"), ("voice_clone", "声音克隆"), ("separation", "人声分离"), ("transcription", "参考音转写（可选）") })
+        {
+            var capability = new TextBlock { Text = label + "：检查中…", Foreground = MutedBrush, TextWrapping = TextWrapping.Wrap, FontSize = 12 };
+            AutomationProperties.SetAutomationId(capability, "Capability_" + key);
+            _capabilityLabels[key] = capability;
+            body.Children.Add(capability);
+        }
         return Card(body, 16);
     }
 
@@ -1507,24 +1622,48 @@ public sealed partial class MainWindow : Window
         row.Children.Add(new TextBlock { Text = label, Width = 420, VerticalAlignment = VerticalAlignment.Center });
         var state = new TextBlock { Text = "检查中…", Foreground = MutedBrush, Width = 90, VerticalAlignment = VerticalAlignment.Center };
         _runtimeStateLabels[key] = state; row.Children.Add(state);
+        AutomationProperties.SetAutomationId(state, "RuntimeState_" + key);
         var runtimeCommand = key switch { "qwen_python" => "qwen", "separator" => "mel", "asr_python" => "asr", _ => key };
-        var install = ActionButton("安装", () => _ = RunEnvironmentCommandAsync("runtime-install", [runtimeCommand, "--source", _downloadSource], status));
+        var install = ActionButton("安装", () => _ = RunEnvironmentCommandAsync("runtime-install", RuntimeInstallArguments(runtimeCommand, key), status));
+        AutomationProperties.SetAutomationId(install, "RuntimeInstall_" + key);
         install.Visibility = Visibility.Collapsed;
         _runtimeInstallButtons[key] = install;
         row.Children.Add(install);
         return row;
     }
 
-    private async Task RefreshEnvironmentAsync(TextBlock status)
+    private IReadOnlyList<string> RuntimeInstallArguments(string command, string statusKey)
     {
+        var arguments = new List<string> { command, "--source", _downloadSource };
+        if (_runtimeNeedsRepair.Contains(statusKey)) arguments.Add("--repair");
+        return arguments;
+    }
+
+    private Task RefreshEnvironmentAsync(TextBlock status, CancellationToken cancellationToken = default)
+    {
+        if (!_environmentRefreshTask.IsCompleted) return _environmentRefreshTask;
+        var token = _smokeCancellation?.Token ?? cancellationToken;
+        _environmentRefreshTask = RefreshEnvironmentCoreAsync(status, token);
+        return _environmentRefreshTask;
+    }
+
+    private async Task RefreshEnvironmentCoreAsync(TextBlock status, CancellationToken cancellationToken)
+    {
+        status.Text = "正在检查本机 AI 环境…";
+        AutomationProperties.SetItemStatus(status, "Running");
+        _lastEnvironmentError = null;
         try
         {
-            var doctor = await _worker.ExecuteAsync(new WorkerCommand("doctor", []));
+            var doctor = await _worker.ExecuteAsync(new WorkerCommand("doctor", []), cancellationToken);
             _lastDoctorJson = doctor;
-            var models = await _worker.ExecuteAsync(new WorkerCommand("model-status", []));
-            _lastModelStatusJson = models;
             using var doctorDocument = JsonDocument.Parse(doctor);
+            ValidateEnvironmentResponse(doctorDocument.RootElement, "doctor", "checks");
+            _doctorReceived = true;
+            var models = await _worker.ExecuteAsync(new WorkerCommand("model-status", []), cancellationToken);
+            _lastModelStatusJson = models;
             using var modelDocument = JsonDocument.Parse(models);
+            ValidateEnvironmentResponse(modelDocument.RootElement, "model-status", "models");
+            _modelStatusReceived = true;
             if (modelDocument.RootElement.TryGetProperty("download_source", out var source))
                 _downloadSource = source.GetString() ?? "auto";
 
@@ -1545,8 +1684,24 @@ public sealed partial class MainWindow : Window
 
             UpdateEnvironmentIndicators(modelDocument.RootElement, doctorDocument.RootElement);
             status.Text = "本机 AI 环境已检查";
+            _environmentRefreshes++;
+            AutomationProperties.SetItemStatus(status, "Completed");
         }
-        catch (Exception error) { status.Text = "检查失败：" + error.Message; }
+        catch (Exception error)
+        {
+            _lastEnvironmentError = error.Message;
+            status.Text = "检查失败：" + error.Message;
+            AutomationProperties.SetItemStatus(status, "Failed");
+            LogNonFatal("Environment check", error);
+        }
+    }
+
+    private static void ValidateEnvironmentResponse(JsonElement response, string command, string expectedProperty)
+    {
+        if (response.ValueKind != JsonValueKind.Object
+            || (response.TryGetProperty("ok", out var ok) && ok.ValueKind == JsonValueKind.False)
+            || !response.TryGetProperty(expectedProperty, out var value) || value.ValueKind != JsonValueKind.Object)
+            throw new InvalidDataException(command + " 返回了无效的检查结果");
     }
 
     private void UpdateEnvironmentIndicators(JsonElement modelStatus, JsonElement doctor)
@@ -1554,23 +1709,20 @@ public sealed partial class MainWindow : Window
         var checks = doctor.TryGetProperty("checks", out var doctorChecks) ? doctorChecks : default;
         bool Check(string key) => checks.ValueKind == JsonValueKind.Object
             && checks.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.True;
+        var requiredModelsReady = true;
+        var requiredRuntimesReady = true;
         if (modelStatus.TryGetProperty("models", out var models))
         {
             foreach (var (key, statusKey) in new[] { ("qwen", "qwen"), ("mel", "mel_deux"), ("whisper", "whisper") })
             {
                 var installed = models.TryGetProperty(statusKey, out var item)
                     && item.TryGetProperty("installed", out var value) && value.GetBoolean();
-                var healthy = key switch
-                {
-                    "qwen" => Check("qwen_model") && Check("qwen_bridge"),
-                    "mel" => Check("mel_model") && Check("mel_config"),
-                    "whisper" => Check("asr_optional"),
-                    _ => false
-                };
-                var ready = installed && healthy;
+                // model-status validates the model files. Runtime and GPU readiness are separate capabilities.
+                var ready = installed;
+                if (key != "whisper") requiredModelsReady &= ready;
                 if (_modelStateLabels.TryGetValue(key, out var label))
                 {
-                    label.Text = ready ? "✓ 已就绪" : installed ? "需要修复" : "未下载";
+                    label.Text = ready ? "✓ 文件完整" : "缺失或需修复";
                     label.Foreground = ready ? SuccessBrush : new SolidColorBrush(Colors.Orange);
                 }
                 if (_modelDownloadButtons.TryGetValue(key, out var button))
@@ -1592,6 +1744,9 @@ public sealed partial class MainWindow : Window
         }
         if (modelStatus.TryGetProperty("runtime", out var runtime))
         {
+            var runtimeHealth = doctor.TryGetProperty("runtime_health", out var doctorHealth)
+                ? doctorHealth
+                : modelStatus.TryGetProperty("runtime_health", out var modelHealth) ? modelHealth : default;
             foreach (var key in new[] { "qwen_python", "separator", "asr_python" })
             {
                 if (!_runtimeStateLabels.TryGetValue(key, out var label)) continue;
@@ -1604,28 +1759,128 @@ public sealed partial class MainWindow : Window
                     "asr_python" => Check("asr_optional"),
                     _ => false
                 };
+                var healthKey = key switch { "qwen_python" => "qwen", "separator" => "mel", _ => "asr" };
+                var reason = "";
+                if (runtimeHealth.ValueKind == JsonValueKind.Object
+                    && runtimeHealth.TryGetProperty(healthKey, out var health)
+                    && health.ValueKind == JsonValueKind.Object)
+                {
+                    if (health.TryGetProperty("installed", out var present)) installed = present.ValueKind == JsonValueKind.True;
+                    if (health.TryGetProperty("healthy", out var healthValue)) healthy = healthValue.ValueKind == JsonValueKind.True;
+                    if (health.TryGetProperty("reason", out var detail) && detail.ValueKind == JsonValueKind.String)
+                        reason = detail.GetString() ?? "";
+                }
                 var ready = installed && healthy;
+                if (key != "asr_python") requiredRuntimesReady &= ready;
+                if (installed && !healthy) _runtimeNeedsRepair.Add(key);
+                else _runtimeNeedsRepair.Remove(key);
                 label.Text = ready ? "✓ 已就绪" : installed ? "需要修复" : "未安装";
                 label.Foreground = ready ? SuccessBrush : new SolidColorBrush(Colors.Orange);
+                ToolTipService.SetToolTip(label, string.IsNullOrWhiteSpace(reason) ? label.Text : reason);
                 if (_runtimeInstallButtons.TryGetValue(key, out var button))
+                {
+                    button.Content = installed ? "修复" : "安装";
                     button.Visibility = ready ? Visibility.Collapsed : Visibility.Visible;
+                }
             }
         }
-        var allReady = _modelStateLabels.Values.All(label => label.Text.StartsWith("✓"))
-            && _runtimeStateLabels.Values.All(label => label.Text.StartsWith("✓"));
+        else requiredRuntimesReady = false;
+        if (doctor.TryGetProperty("capabilities", out var capabilities) && capabilities.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var (key, title) in new[] { ("format_conversion", "格式转换"), ("voice_clone", "声音克隆"), ("separation", "人声分离"), ("transcription", "参考音转写（可选）") })
+            {
+                if (!_capabilityLabels.TryGetValue(key, out var label)) continue;
+                var ready = capabilities.TryGetProperty(key, out var capability)
+                    && capability.ValueKind == JsonValueKind.Object
+                    && capability.TryGetProperty("ready", out var readyValue) && readyValue.ValueKind == JsonValueKind.True;
+                var reason = capability.ValueKind == JsonValueKind.Object
+                    && capability.TryGetProperty("reason", out var detail) && detail.ValueKind == JsonValueKind.String
+                    ? detail.GetString() : "";
+                label.Text = title + (ready ? "：✓ 已就绪" : "：" + (string.IsNullOrWhiteSpace(reason) ? "尚未就绪" : reason));
+                label.Foreground = ready ? SuccessBrush : MutedBrush;
+            }
+        }
+        else
+        {
+            // Older workers provide checks only; retain useful, conservative status text.
+            foreach (var (key, title, ready) in new[] {
+                ("format_conversion", "格式转换", Check("format_converter_binary")),
+                ("voice_clone", "声音克隆", Check("qwen_runtime") && Check("qwen_model") && Check("qwen_bridge")),
+                ("separation", "人声分离", Check("mel_runtime") && Check("mel_model") && Check("mel_config") && Check("mel_ffmpeg")),
+                ("transcription", "参考音转写（可选）", Check("asr_optional")) })
+                if (_capabilityLabels.TryGetValue(key, out var label))
+                    label.Text = title + (ready ? "：基础检查通过（旧版 Worker）" : "：环境需检查");
+        }
         if (_environmentInstallNotice is not null)
-            _environmentInstallNotice.Visibility = allReady ? Visibility.Collapsed : Visibility.Visible;
+            _environmentInstallNotice.Visibility = requiredModelsReady && requiredRuntimesReady ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private string BuildDiagnosticsText() =>
-        $"SPP Audio Studio Windows 诊断\n\nDoctor\n{PrettyJsonOrUnavailable(_lastDoctorJson)}\n\n模型与运行环境\n{PrettyJsonOrUnavailable(_lastModelStatusJson)}";
+        $"SPP Audio Studio Windows {SmokeTestReport.AppVersion} 诊断\n时间：{DateTimeOffset.Now:O}\n系统：{System.Environment.OSVersion}\n\nDoctor\n{PrettyJsonOrUnavailable(_lastDoctorJson)}\n\n模型与运行环境\n{PrettyJsonOrUnavailable(_lastModelStatusJson)}";
 
-    private void CopyDiagnostics()
+    private void CopyDiagnostics() =>
+        _ = CopyTextAsync(BuildDiagnosticsText(), _diagnosticsStatus, "已复制诊断", "可点击“保存诊断”导出文件。");
+
+    private async Task CopyTextAsync(string text, TextBlock? status, string successMessage, string failureHint = "请稍后重试。")
     {
-        var package = new DataPackage();
-        package.SetText(BuildDiagnosticsText());
-        Clipboard.SetContent(package);
-        Clipboard.Flush();
+        await _clipboardGate.WaitAsync();
+        try
+        {
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                try
+                {
+                    var package = new DataPackage();
+                    package.SetText(text);
+                    Clipboard.SetContent(package);
+                    Clipboard.Flush();
+                    if (status is not null) status.Text = successMessage;
+                    return;
+                }
+                catch (Exception error) when (error.HResult == unchecked((int)0x800401D0) && attempt < 2)
+                {
+                    // Another application may briefly own the clipboard. Keep retries on the UI thread.
+                    await Task.Delay(100 * (attempt + 1));
+                }
+                catch (Exception error)
+                {
+                    LogNonFatal("Clipboard", error);
+                    if (status is not null) status.Text = $"复制失败，剪贴板暂不可用。{failureHint}";
+                    return;
+                }
+            }
+        }
+        finally { _clipboardGate.Release(); }
+    }
+
+    private async Task SaveDiagnosticsAsync()
+    {
+        try
+        {
+            var picker = new FileSavePicker { SuggestedFileName = $"SPP-Windows-diagnostics-{DateTime.Now:yyyyMMdd-HHmmss}" };
+            picker.FileTypeChoices.Add("诊断文本", new List<string> { ".txt" });
+            InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+            var file = await picker.PickSaveFileAsync();
+            if (file is null) return;
+            await FileIO.WriteTextAsync(file, BuildDiagnosticsText());
+            if (_diagnosticsStatus is not null) _diagnosticsStatus.Text = "诊断已保存：" + file.Path;
+        }
+        catch (Exception error)
+        {
+            LogNonFatal("Save diagnostics", error);
+            if (_diagnosticsStatus is not null) _diagnosticsStatus.Text = "保存诊断失败：" + error.Message;
+        }
+    }
+
+    private static void LogNonFatal(string operation, Exception error)
+    {
+        try
+        {
+            var directory = IOPath.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData), "SPP Audio Studio", "Logs");
+            Directory.CreateDirectory(directory);
+            File.AppendAllText(IOPath.Combine(directory, "winui-diagnostics.log"), $"[{DateTimeOffset.Now:O}] {operation}: {error}\r\n\r\n");
+        }
+        catch { }
     }
 
     private void ShowDiagnostics()
@@ -1662,11 +1917,7 @@ public sealed partial class MainWindow : Window
 
     private void CopyModelFolder(string key, TextBlock status)
     {
-        var package = new DataPackage();
-        package.SetText(ModelFolderPath(key));
-        Clipboard.SetContent(package);
-        Clipboard.Flush();
-        status.Text = "已复制模型目录路径";
+        _ = CopyTextAsync(ModelFolderPath(key), status, "已复制模型目录路径");
     }
 
     private void OpenModelFolder(string key, TextBlock status)
@@ -1723,11 +1974,7 @@ public sealed partial class MainWindow : Window
             var url = $"https://huggingface.co/{repo}/resolve/{revision}/{file}?download=true";
             return all ? $"{file}\n{url}" : url;
         }));
-        var package = new DataPackage();
-        package.SetText(links);
-        Clipboard.SetContent(package);
-        Clipboard.Flush();
-        status.Text = all ? "已复制全套固定版本模型地址（请保留子目录结构）" : "已复制主文件固定版本下载地址";
+        _ = CopyTextAsync(links, status, all ? "已复制全套固定版本模型地址（请保留子目录结构）" : "已复制主文件固定版本下载地址");
     }
 
     private async Task SetDownloadSourceAsync(string source, TextBlock status)
@@ -1758,8 +2005,8 @@ public sealed partial class MainWindow : Window
         var modelKey = command == "model-download" && arguments.Count > 0 ? arguments[0] : null;
         try
         {
-            var json = await RunWorkerAsync(command, arguments, cancellation.Token);
-            status.Text = PrettyJson(json);
+            await RunWorkerAsync(command, arguments, cancellation.Token);
+            status.Text = "操作完成，正在检查环境…";
             await RefreshWorkerStatusAsync();
             if (refreshEnvironment) await RefreshEnvironmentAsync(status);
             return true;
@@ -1800,7 +2047,10 @@ public sealed partial class MainWindow : Window
             ("runtime-install", "mel"), ("model-download", "mel"),
             ("runtime-install", "asr"), ("model-download", "whisper") })
         {
-            if (!await RunEnvironmentCommandAsync(command, [component, "--source", _downloadSource], status, false))
+            var arguments = command == "runtime-install"
+                ? RuntimeInstallArguments(component, component switch { "qwen" => "qwen_python", "mel" => "separator", _ => "asr_python" })
+                : new List<string> { component, "--source", _downloadSource };
+            if (!await RunEnvironmentCommandAsync(command, arguments, status, false))
             {
                 status.Text = $"安装在 {component} 步骤中断或失败：{status.Text}";
                 break;
@@ -2070,12 +2320,19 @@ public sealed partial class MainWindow : Window
         row.ColumnDefinitions.Add(new ColumnDefinition());
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         var copy = new StackPanel { Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
         copy.Children.Add(new TextBlock { Text = "诊断与日志", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
-        copy.Children.Add(new TextBlock { Text = "遇到问题时复制诊断发给维护者即可。", Foreground = MutedBrush, FontSize = 11 });
+        _diagnosticsStatus = new TextBlock { Text = "可复制诊断或保存为文件。", Foreground = MutedBrush, FontSize = 11, TextWrapping = TextWrapping.Wrap };
+        AutomationProperties.SetAutomationId(_diagnosticsStatus, "DiagnosticsStatus");
+        copy.Children.Add(_diagnosticsStatus);
         row.Children.Add(copy);
         var copyButton = ActionButton("复制诊断", CopyDiagnostics); Grid.SetColumn(copyButton, 1); row.Children.Add(copyButton);
         var detailButton = ActionButton("查看详情", ShowDiagnostics); Grid.SetColumn(detailButton, 2); row.Children.Add(detailButton);
+        var saveButton = ActionButton("保存诊断", () => _ = SaveDiagnosticsAsync()); Grid.SetColumn(saveButton, 3); row.Children.Add(saveButton);
+        AutomationProperties.SetAutomationId(copyButton, "CopyDiagnostics");
+        AutomationProperties.SetAutomationId(detailButton, "ShowDiagnostics");
+        AutomationProperties.SetAutomationId(saveButton, "SaveDiagnostics");
         return Card(row, 12);
     }
 

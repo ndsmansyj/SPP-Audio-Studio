@@ -1,187 +1,126 @@
 # SPP Audio Studio for Windows
 
-Windows 独立实现位于本目录，macOS 代码保持不变。
+当前 Windows 正式版为 **1.0.3**。从[发行页面](https://github.com/ndsmansyj/SPP-Audio-Studio/releases/tag/v1.0.3)下载完整 ZIP，解压到新目录，运行根目录的 `SPP Audio Studio.exe`。目标机器不需要预装 Python 或 .NET。
 
-## 目录
+## 使用、升级与修复
 
-- `src/SPPAudioStudio.Core` — 平台无关的文件策略、任务、校验与 Worker 状态抽象。
-- `src/SPPAudioStudio.Windows` — WinUI 3 / Windows App SDK 桌面应用。
-- `worker` — Windows 专用 Python Worker、本机 API 与 CUDA 推理桥接。
-- `tests/SPPAudioStudio.Core.Tests` — C# Core 测试。
-- `src/FormatConverter` — 无额外运行时依赖的 .NET 8 本地音频格式转换 CLI。
-- `tests/test_worker.py` — 不下载模型即可运行的 Worker 测试。
+发布版面向 Windows 10 / 11 x64。格式转换可独立使用；声音克隆、人声分离和自动转写使用 NVIDIA CUDA。首次使用 AI 功能时，在「模型与环境」中安装对应模型和运行环境。
 
-## 当前开发构建
+升级时使用新目录，保留完整的 `app/`、`worker/`、`python-core/` 和启动器。不要从旧 ZIP 复制单个 EXE 或桥接脚本覆盖新版。用户数据默认保存在 `%LOCALAPPDATA%\SPP Audio Studio\`，包含模型、声音模板、运行环境、缓存、设置和历史，更新应用不会删除这些数据。
 
-```bash
-dotnet test windows/SPPAudioStudio.Windows.sln -c Release
-dotnet build windows/src/SPPAudioStudio.Windows/SPPAudioStudio.Windows.csproj -c Release -p:Platform=x64
-python -m unittest discover -s windows/tests -v
-```
+「模型与环境」分别展示模型、运行环境和硬件状态。安装记录存在不等于组件健康；运行环境完整也不等于当前机器具备 CUDA 推理能力。运行环境损坏时，使用对应卡片的修复操作。修复会先在暂存目录准备并校验新环境，成功后再替换旧环境。
 
-应用默认窗口为 1980×1600，最小窗口为 1040×840，使用浅色主题。未成功连接 Worker 或模型未通过健康检查时，界面必须如实显示未就绪，不使用样例状态冒充真实运行状态。
+复制诊断或路径遇到剪贴板占用时会显示提示；也可以保存诊断文件。反馈问题时附上诊断文件、操作步骤和日志。FFmpeg 优先使用应用管理的副本，并检查实际执行结果，避免系统 PATH 中的空文件、无效链接或错误架构程序误报就绪。
+
+## 代码目录
+
+| 路径 | 职责 |
+| --- | --- |
+| `src/SPPAudioStudio.Windows` | WinUI 3 桌面界面 |
+| `src/SPPAudioStudio.Core` | 文件策略、任务与 Worker 进程协议 |
+| `src/AppLauncher` | 根目录原生启动器 |
+| `src/FormatConverter` | .NET 8 本地音频格式转换 CLI |
+| `worker` | Windows Worker、本机 API、模型与 CUDA 桥接 |
+| `tests` | Python、C#、完整包与界面回归 |
 
 ## Windows Worker
 
-格式转换由独立的 .NET CLI 负责，处理受支持的本地音频容器并保留原始音频编码；不会改写源文件，输出冲突时由应用侧生成新的文件名。
-
-发布版面向 Windows 10/11 x64，自带 Python Core；目标机器不需要预装 Python。开发模式使用 Python 3.11。可通过 `SPP_PYTHON_CORE` 指定 Python，通过 `SPP_FORMAT_BIN` 指定转换器。状态保存在 `%LOCALAPPDATA%\SPP Audio Studio\` 下，包括 `Models`、`Voices`、`Runtime`、`Cache`、设置及历史记录。
-
-CLI 与 macOS Worker 的主要命令保持一致：
+开发模式使用 Python 3.11，发布版自带 Python Core。可用 `SPP_PYTHON_CORE` 指定解释器、`SPP_FORMAT_BIN` 指定格式转换器。下面的命令在仓库根目录执行：
 
 ```powershell
 python windows/worker/spp_worker.py doctor
 python windows/worker/spp_worker.py model-status
-python windows/worker/spp_worker.py runtime-install qwen|mel|asr
-python windows/worker/spp_worker.py model-download qwen|mel|whisper
+python windows/worker/spp_worker.py runtime-install qwen
+python windows/worker/spp_worker.py runtime-install qwen --repair
+python windows/worker/spp_worker.py model-download qwen
 python windows/worker/spp_worker.py voice-list
 ```
 
-模型使用 `.part` 文件断点续传并自动测速选源。Qwen 会在 ModelScope、HF Mirror 与 Hugging Face 官方之间选择；Python 依赖会在清华、USTC、阿里云与 PyPI 官方之间选择；PyTorch CUDA 会在 SJTU 与官方源之间选择并检查目标 Windows wheel 是否存在。Qwen、Whisper 与 Mel 均固定 revision；可获得 SHA-256 的大文件会同时校验尺寸和哈希。测试不会下载模型。
+运行环境名称为 `qwen`、`mel`、`asr`，模型名称为 `qwen`、`mel`、`whisper`。运行环境修复不删除模型和声音模板。`doctor` 命令成功只代表诊断执行完成；业务是否就绪应查看对应功能的检查结果。
 
-AI 推理为 CUDA-only：Qwen 使用 SDPA + BF16，Whisper 使用 CTranslate2 CUDA FP16，Mel 在入口检查 CUDA；缺少 CUDA 时直接失败，禁止静默回退 CPU。跨进程 `gpu.lock` 串行化 Qwen/ASR 与 Mel 任务，避免 RTX 4080 16GB 上并发争抢显存。运行时固定为 `qwen-tts==0.1.1`、`faster-whisper==1.2.1`、`ctranslate2==4.8.2`、`audio-separator==0.47.0`。PyTorch 与 torchaudio 固定为 `2.11.0+cu126`；该组合已通过 PyTorch 官方 cu126 index 的 `pip index versions` 验证可用。
+模型按来源保存 `.part` 断点缓存，避免混用不同来源的响应。Qwen 在 ModelScope、HF Mirror 与 Hugging Face 官方之间测速选源；模型固定 revision，可获得 SHA-256 的大文件会校验尺寸和哈希。正确文件可跳过，损坏或超出预期大小的缓存会重建。
 
-本机 API 仅绑定 `127.0.0.1` 并要求 Bearer Token。发布包可直接运行根目录的 `SPP Agent API.cmd`；默认 Token 与发现信息写在 `%LOCALAPPDATA%\\SPP Audio Studio\\` 下。
+AI 推理保持 CUDA-only：Qwen 使用 SDPA + BF16，Whisper 使用 CTranslate2 CUDA FP16，Mel 在入口检查 CUDA。缺少 CUDA 时给出失败原因，不自动切到 CPU。跨进程 `gpu.lock` 串行化 AI 任务，避免并发争抢显存。
 
-核心接口包括 `GET /v1/capabilities`、`GET /v1/status`、`GET /v1/voices`、`POST /v1/tasks` 与 `GET /v1/tasks/{task_id}`。长任务默认串行排队，返回 `task_id` 后可异步查询结果；旧的同步 `/v1/convert`、`/v1/separate`、`/v1/clone` 继续保留兼容。
+运行环境安装配方以 `worker/runtime_manifest.py` 为准，直接依赖也列在 `requirements-qwen.txt`、`requirements-mel.txt`、`requirements-asr.txt`。安装记录包含配方指纹、Python ABI 和实际安装的依赖元数据；这些记录不是所有传递依赖的离线 wheel 锁文件。旧版运行环境缺少新版验证记录时会提示修复，模型与声音模板继续保留。SPP 使用 Qwen3-TTS **12Hz** 模型，不因可选 25Hz 路径的 SoX 导入告警阻断 12Hz 工作流。
 
-## 开发与发布脚本
+### 存储与磁盘空间
 
-This directory owns the Windows implementation layout and its build tooling. The scripts are location-independent and work from PowerShell or Git Bash. They expect:
+Windows Qwen 使用原始 CUDA 权重，与 macOS MLX 8-bit 权重不同。模型目录和 Python / PyTorch Runtime 分开存储；「模型存储位置」只迁移模型，不迁移 Runtime。
 
-- `windows/src/`: one WinUI 3 .NET 8 `.csproj` (or pass `-Project`).
-- `windows/worker/`: Python worker with `main.py`, `spp_worker.py`, `local_api.py`, or `__main__.py` (or pass `-WorkerEntryPoint`).
-- `windows/worker/requirements.lock`: preferred pinned worker dependencies. `requirements.txt` is accepted with a reproducibility warning.
+Runtime 安装暂存、pip 缓存和 TMP / TEMP 放在 `%LOCALAPPDATA%\SPP Audio Studio\Runtime` 下。该目录通过 Windows Junction 指向其他磁盘时，安装临时文件也会随之迁移。修复阶段需要同时容纳旧环境和新环境，请预留空间，不要删除正在使用的 Runtime 或 Windows Python 目录。
 
-Intermediate build files stay below `windows/artifacts/` and `windows/.venv/`; the visible portable release is generated in the repository-root `SPP Audio Studio/` directory.
+### 本机 API
 
-## Prerequisites and bootstrap
+发布包根目录提供 `SPP Agent API.cmd`。API 仅绑定 `127.0.0.1`，要求 Bearer Token；Token 和发现信息位于用户数据目录。
 
-Pinned versions are recorded in `toolchain.json` and `global.json`. Visual Studio Build Tools must include the managed desktop build workload and Windows 11 SDK 22621.
+接口包括 `GET /v1/capabilities`、`GET /v1/status`、`GET /v1/voices`、`POST /v1/tasks` 与 `GET /v1/tasks/{task_id}`。长任务串行排队，返回 `task_id` 后可查询结果；旧的同步 `/v1/convert`、`/v1/separate`、`/v1/clone` 保留兼容。
 
-PowerShell:
+## 构建工具链
+
+版本以 `toolchain.json`、`global.json` 和项目文件为准。当前使用 .NET 8 SDK、Python 3.11、Visual Studio 2022 Build Tools、Windows SDK 22621；需安装托管桌面、C++ 和 WinUI 构建所需组件。
 
 ```powershell
-# Check only; does not install or create a virtual environment.
+# 只检查工具链
 .\windows\bootstrap.ps1 -CheckOnly
 
-# Install missing SDKs with winget (elevates through the installer if needed).
+# 安装缺少的工具；完成后重新打开终端
 .\windows\bootstrap.ps1 -InstallMissing
 
-# Create/update windows/.venv and install packaging + worker dependencies.
+# 准备 windows/.venv 与构建依赖
 .\windows\bootstrap.ps1
-```
 
-Git Bash:
-
-```bash
-./windows/bootstrap.sh -CheckOnly
-./windows/bootstrap.sh -InstallMissing
-./windows/bootstrap.sh
-```
-
-After `-InstallMissing`, open a new shell before running bootstrap again so Windows refreshes `PATH`.
-
-## Build and test
-
-```powershell
-.\windows\build.ps1
+# 编译并运行回归测试
 .\windows\build.ps1 -Configuration Release -Platform x64
-.\windows\build.ps1 -Project C:\path\to\App.csproj -SkipWorker
 ```
 
-```bash
-./windows/build.sh -Configuration Release -Platform x64
-```
+Git Bash 可使用同名 `.sh` 包装脚本。脚本从自身位置定位仓库；中间文件位于 `windows/artifacts/` 和 `windows/.venv/`。
 
-The build restores and compiles the WinUI project, byte-compiles the worker, runs any `*Tests.csproj`, and runs `windows/worker/tests` with `unittest` when present. Use `-SkipTests`, `-SkipWorker`, or `-NoRestore` only for deliberate incremental work.
-
-## Publish a portable release
+单独运行不下载模型的测试：
 
 ```powershell
-.\windows\publish.ps1 -Version 1.0.0 -Platform x64
+python -m unittest discover -s windows/tests -p 'test*.py' -v
+dotnet test windows/tests/SPPAudioStudio.Core.Tests/SPPAudioStudio.Core.Tests.csproj -c Release
+dotnet test windows/tests/FormatConverter.Tests/FormatConverter.Tests.csproj -c Release
 ```
 
-```bash
-./windows/publish.sh -Version 1.0.0 -Platform x64
-```
+PowerShell 脚本解析与真实 WinUI 测试应在 Windows 执行。无 GPU 的构建机可以验证诊断、界面、进程协议和包完整性，不能据此宣称已完成 CUDA 模型推理验收。
 
-The release strategy is **unpackaged, self-contained, portable**:
-
-- WinUI app: .NET self-contained publish plus Windows App SDK self-contained files.
-- Python worker: PyInstaller `--onedir`; no system Python is required on the target machine.
-- Output tree: `SPP Audio Studio\` at the repository root, with `SPPAudioStudio.Windows.exe` directly in that folder and the frozen Worker under `worker\`.
-- Archive: `windows/artifacts/packages/SPPAudioStudio-<version>-win-x64.zip`; extracting it preserves the top-level `SPP Audio Studio/` folder.
-- Integrity: `SPP Audio Studio/release-manifest.json`, `SPP Audio Studio/SHA256SUMS`, and an archive `.sha256` file.
-
-This is intentionally not MSIX: portable builds avoid certificate/install requirements and are suitable for CI artifacts and developer previews. Add an MSIX signing pipeline separately when an installer identity and signing certificate are available.
-
-Verify an archive checksum:
+## 完整便携包发布
 
 ```powershell
-Get-FileHash .\windows\artifacts\packages\SPPAudioStudio-1.0.0-win-x64.zip -Algorithm SHA256
-Get-Content .\windows\artifacts\packages\SPPAudioStudio-1.0.0-win-x64.zip.sha256
+.\windows\publish.ps1 -Version 1.0.3 -Platform x64
 ```
 
-## Launch
+发布从当前源码构建全部组件，不拼接旧版 ZIP：
 
-Launch the published app:
+```text
+SPP Audio Studio/
+  SPP Audio Studio.exe
+  SPP Agent API.cmd
+  app/
+  worker/
+  python-core/
+  release-manifest.json
+  SHA256SUMS
+```
+
+WinUI 和转换器包含 .NET 运行时；Worker 使用 PyInstaller `--onedir`；CUDA 桥接使用随包提供的真实 CPython。输出 ZIP 为 `windows/artifacts/packages/SPPAudioStudio-1.0.3-win-x64.zip`，保留顶层文件夹，并附带 `.sha256`。
+
+最终包验证应解压 ZIP，检查全部清单文件、大小、SHA-256、关键组件和源码提交，再从解压后的包启动界面。界面回归覆盖「模型与环境」异步检查完成与页面反复切换；仅看见主窗口不算通过。
+
+```powershell
+Get-FileHash .\windows\artifacts\packages\SPPAudioStudio-1.0.3-win-x64.zip -Algorithm SHA256
+Get-Content .\windows\artifacts\packages\SPPAudioStudio-1.0.3-win-x64.zip.sha256
+```
+
+## 启动与 CI
 
 ```powershell
 .\windows\launch.ps1
-.\windows\launch.ps1 -StartWorker
+.\windows\launch.ps1 -Development
 ```
 
-Development mode uses `dotnet run` and the virtual-environment worker:
+实际生效的 GitHub Actions 位于仓库根目录 `.github/workflows/`。Windows 稳定性流水线执行 Python 与 C# 回归、完整发布和最终包检查，保存 ZIP、校验和与验证报告；正式发行上传已经验证的同一份 ZIP。
 
-```powershell
-.\windows\launch.ps1 -Development -StartWorker
-```
-
-Git Bash equivalents:
-
-```bash
-./windows/launch.sh
-./windows/launch.sh -Development -StartWorker
-```
-
-Pass application or worker arguments with PowerShell arrays, for example:
-
-```powershell
-.\windows\launch.ps1 -StartWorker -AppArguments @('--verbose') -WorkerArguments @('--port','8765')
-```
-
-## CI
-
-`ci/windows.yml` contains the Windows GitHub Actions workflow but lives under `windows/` to keep this branch scoped. Copy it to `.github/workflows/windows.yml` when integrating the Windows branches:
-
-```powershell
-Copy-Item .\windows\ci\windows.yml .\.github\workflows\windows.yml
-```
-
-## Script validation
-
-```powershell
-python -m unittest windows.tests.test_packaging -v
-```
-
-The tests parse every PowerShell script, validate the manifests/wrappers, and check release-integrity generation is present.
-
-
-### 模型下载、Runtime 与磁盘空间
-
-Windows Qwen3-TTS 使用约 3.86 GB 的原始权重（与 macOS MLX 8-bit 权重不同），
-另有约 0.68 GB 的 speech tokenizer。模型目录与 Python/PyTorch Runtime 是两种独立存储。
-
-新版下载器按来源保存 .part 断点缓存，避免切换源时把不同主机的响应拼接。
-发现超出预期大小或校验失败时，会重置对应临时文件并尝试其他来源。
-「模型与环境」中可展开模型卡片复制固定版本的下载链接、目录结构、打开目标文件夹。
-已有正确文件可跳过；大型权重通过 SHA-256 校验。
-
-空间说明：CUDA PyTorch 运行环境以及 pip 临时解包会占用大量空间。
-新版把 Runtime 安装暂存、pip 缓存和 TMP/TEMP 安装临时目录放到
-%LOCALAPPDATA%\SPP Audio Studio\Runtime 下面。如果该目录已经通过
-Windows Junction 指向空间充足的另一块磁盘，这些文件也会跟随迁移。
-App 的「模型存储位置」设置只控制模型权重，不改变 Runtime 目录。
-如果 C 盘空间不足，请先安排 Runtime 存储位置，并确认目标盘有足够空间；
-不要直接删除正在使用的 Runtime 或 Windows Python 目录。
+版本与来源提交记录在包内 `release-manifest.json`。发布标签、Release 说明和下载入口应指向相同的源码版本；历史恢复流程不再自动覆盖已有正式版资产。

@@ -16,6 +16,16 @@ import time
 from pathlib import Path
 from urllib.parse import quote, quote_plus
 
+# Source scripts, embedded Python Core, and the frozen worker share these helpers.
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+from media_tools import ffmpeg_environment, install_ffmpeg, probe_ffmpeg, resolve_ffmpeg
+from runtime_manifest import (
+    ASR_RUNTIME_PACKAGES, MEL_RUNTIME_DEPS, MEL_RUNTIME_PACKAGE,
+    PYTORCH_CUDA_PACKAGES, QWEN_RUNTIME_PACKAGES, SCHEMA_VERSION,
+    distribution_inventory, manifest_id, runtime_health,
+)
+
 # The WinUI host reads Worker stdout/stderr as UTF-8. Force the frozen
 # interpreter to use the same encoding instead of the active Windows code page.
 for _stream in (sys.stdout, sys.stderr):
@@ -118,21 +128,6 @@ ASR_SITE = ASR_RUNTIME_DIR / "site-packages"
 PYTORCH_CUDA_OFFICIAL = "https://download.pytorch.org/whl/cu126"
 PYTORCH_CUDA_SJTU = "https://mirror.sjtu.edu.cn/pytorch-wheels/cu126"
 PYTORCH_CUDA_INDEX = PYTORCH_CUDA_OFFICIAL
-PYTORCH_CUDA_PACKAGES = ["torch==2.11.0+cu126", "torchaudio==2.11.0+cu126"]
-QWEN_RUNTIME_PACKAGES = PYTORCH_CUDA_PACKAGES + ["qwen-tts==0.1.1", "soundfile>=0.12", "imageio-ffmpeg>=0.6"]
-ASR_RUNTIME_PACKAGES = ["faster-whisper==1.2.1", "ctranslate2==4.8.2", "imageio-ffmpeg>=0.6"]
-MEL_RUNTIME_PACKAGE = "audio-separator==0.47.0"
-# Mel-Deux uses the MDXC path. diffq is only required by Demucs in audio-separator,
-# so RC6 installs the needed all-wheel dependencies explicitly and skips diffq.
-MEL_RUNTIME_DEPS = [
-    "beartype>=0.18.5,<0.19.0", "einops>=0.7", "julius>=0.2",
-    "librosa>=0.10", "ml_collections", "numpy>=2", "onnx-weekly",
-    "onnxruntime==1.29.0",
-    "onnx2torch>=1.5", "packaging", "pydub>=0.25", "pyyaml",
-    "requests>=2", "resampy>=0.4", "rotary-embedding-torch>=0.6.1,<0.7.0",
-    "samplerate>=0.1", "scipy>=1.13.0,<2.0.0", "six>=1.16",
-    "soundfile>=0.12", *PYTORCH_CUDA_PACKAGES, "tqdm", "imageio-ffmpeg>=0.6",
-]
 PYPI_OFFICIAL = "https://pypi.org/simple"
 PYPI_MIRROR = "https://pypi.tuna.tsinghua.edu.cn/simple"
 PYPI_USTC = "https://mirrors.ustc.edu.cn/pypi/simple"
@@ -207,13 +202,14 @@ def append_history(kind: str, source: str, output: str, status: str = "done") ->
         f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
 
-def run_capture(cmd: list[str], env: dict | None = None) -> subprocess.CompletedProcess:
+def run_capture(cmd: list[str], env: dict | None = None, timeout: float | None = None) -> subprocess.CompletedProcess:
     merged = os.environ.copy()
     merged.pop("PYTHONPATH", None)
     merged["PYTHONIOENCODING"] = "utf-8"
     if env:
         merged.update(env)
-    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", env=merged)
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", env=merged, timeout=timeout,
+                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
 def _managed_command(kind: str, args: list[str]) -> list[str]:
@@ -231,12 +227,57 @@ def _pip_command(args: list[str]) -> list[str]:
 
 
 def _verification_script(kind: str) -> str:
-    scripts = {
-        "asr": "import ctranslate2, faster_whisper; assert ctranslate2.get_cuda_device_count() > 0, 'CUDA unavailable'; print('ASR_RUNTIME_OK')",
-        "qwen": "import qwen_tts, torch; assert torch.cuda.is_available(), 'CUDA unavailable'; assert torch.cuda.is_bf16_supported(), 'CUDA BF16 unavailable'; print('QWEN_RUNTIME_OK')",
-        "mel": "from audio_separator.separator import Separator; import imageio_ffmpeg, torch; assert torch.cuda.is_available(), 'CUDA unavailable'; print(imageio_ffmpeg.get_ffmpeg_exe())",
+    imports = {
+        "asr": "import ctranslate2, faster_whisper, imageio_ffmpeg",
+        "qwen": "import qwen_tts, torch, torchaudio, soundfile, imageio_ffmpeg",
+        "mel": "from audio_separator.separator import Separator\nimport torch, onnxruntime, imageio_ffmpeg",
     }
-    return scripts[kind]
+    # Imports validate the installation. Hardware is a separate result: installing
+    # again cannot create a GPU or fix an unsupported NVIDIA driver. No model loads.
+    hardware = """
+    if not torch.cuda.is_available():
+        raise RuntimeError('CUDA 不可用，请检查 NVIDIA 显卡与驱动')
+    dtype = torch.float32
+    if KIND == 'qwen':
+        if not torch.cuda.is_bf16_supported():
+            raise RuntimeError('此显卡不支持 Qwen 所需的 CUDA BF16')
+        dtype = torch.bfloat16
+    tensor = torch.ones((2, 2), device='cuda', dtype=dtype)
+    result = tensor @ tensor
+    torch.cuda.synchronize()
+    del tensor, result
+""" if kind != "asr" else """
+    if ctranslate2.get_cuda_device_count() < 1:
+        raise RuntimeError('CUDA 不可用，请检查 NVIDIA 显卡与驱动')
+    if sys.platform == 'win32':
+        import ctypes
+        directory = os.environ.get('SPP_ASR_CUDA_DLL_DIR', '')
+        if not directory:
+            raise RuntimeError('Whisper 需要托管 Qwen/Mel 的 CUDA 12 cuBLAS 组件')
+        search_handle = os.add_dll_directory(directory)
+        dll_handles = [ctypes.WinDLL(os.path.join(directory, name))
+                       for name in ('cublasLt64_12.dll', 'cublas64_12.dll')]
+"""
+    return ("import json, os, sys\n" + imports[kind] + "\n"
+            + f"KIND = {kind!r}\n"
+            + "hardware = {'ready': False, 'reason': '', 'status': 'unavailable'}\ntry:\n"
+            + "    if os.environ.get('SPP_RUNTIME_PROBE_GPU', '1') != '1':\n"
+            + "        hardware['status'] = 'busy'\n"
+            + "        raise RuntimeError('GPU 正在执行任务，任务结束后可重新检查硬件；运行环境无需重装')\n"
+            + hardware
+            + "    hardware.update(ready=True, status='ready')\n"
+            + "except Exception as exc:\n    hardware['reason'] = str(exc)\n"
+            + "print('SPP_RUNTIME_PROBE=' + json.dumps({'hardware': hardware, "
+              "'python_abi': f'{sys.version_info.major}.{sys.version_info.minor}', "
+              "'ffmpeg': imageio_ffmpeg.get_ffmpeg_exe()}, ensure_ascii=False))")
+
+
+def _probe_result(proc: subprocess.CompletedProcess) -> dict:
+    prefix = "SPP_RUNTIME_PROBE="
+    for line in reversed((proc.stdout or "").splitlines()):
+        if line.startswith(prefix):
+            return json.loads(line[len(prefix):])
+    raise ValueError("运行环境验证未返回完整结果")
 
 
 def _verify_command(kind: str, site: Path) -> list[str]:
@@ -272,67 +313,109 @@ def gpu_lock(timeout: float = 3600):
         handle.close()
 
 
+def media_tool_status() -> dict:
+    return resolve_ffmpeg(
+        [QWEN_RUNTIME_DIR, MEL_RUNTIME_DIR, ASR_RUNTIME_DIR, RUNTIME_DIR / "tools"],
+        [QWEN_SITE, MEL_SITE, ASR_SITE], os.environ.get("SPP_FFMPEG"),
+        canonical_dir=RUNTIME_DIR / "tools" / "ffmpeg",
+    )
+
+
 def locate_ffmpeg() -> Path | None:
-    bundled = [p for site in (QWEN_SITE, MEL_SITE, ASR_SITE)
-               for p in (site / "imageio_ffmpeg" / "binaries").glob("ffmpeg*.exe")]
-    candidates = [
-        shutil.which("ffmpeg"),
-        str(MEL_RUNTIME_DIR / "ffmpeg/ffmpeg.exe"),
-        str(ASR_RUNTIME_DIR / "ffmpeg/ffmpeg.exe"),
-    ] + [str(p) for p in bundled]
-    for value in candidates:
-        if value:
-            p = Path(value)
-            if p.is_file() and os.access(p, os.X_OK):
-                return p
-    return None
+    report = media_tool_status()
+    return Path(report["path"]) if report["ready"] else None
+
+
+def _runtime_health(kind: str) -> dict:
+    root = {"qwen": QWEN_RUNTIME_DIR, "mel": MEL_RUNTIME_DIR, "asr": ASR_RUNTIME_DIR}[kind]
+    health = runtime_health(kind, root)
+    if health["healthy"] and kind == "mel" and not _mel_registry_ready(root / "site-packages"):
+        health.update(healthy=False, status="repair_required", reason="Mel 模型注册信息缺失，请修复运行环境")
+    if health["healthy"] and not PYTHON_CORE.is_file():
+        health.update(healthy=False, status="repair_required", reason="App 内置 Python Core 缺失，请修复应用安装")
+    return health
+
+
+def _live_runtime_health(kind: str, health: dict, probe_gpu: bool = True, gpu_locked: bool = False) -> dict:
+    if not health["healthy"]:
+        return health
+    site = {"qwen": QWEN_SITE, "mel": MEL_SITE, "asr": ASR_SITE}[kind]
+    result = dict(health)
+    try:
+        proc = _verify_python_import(kind, site, probe_gpu=probe_gpu, gpu_locked=gpu_locked)
+        if proc.returncode:
+            raise ValueError((proc.stderr or proc.stdout or "组件导入失败")[-1000:])
+        result.update(_probe_result(proc), reason="组件导入与安装指纹检查通过")
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        result.update(healthy=False, status="repair_required", reason=str(exc))
+    return result
+
+
+def _doctor_runtime_health(health: dict) -> dict:
+    def check(probe_gpu: bool) -> dict:
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            values = pool.map(lambda item: _live_runtime_health(*item, probe_gpu=probe_gpu, gpu_locked=probe_gpu), health.items())
+            return dict(zip(health, values))
+    if not any(item["healthy"] for item in health.values()):
+        return health
+    try:
+        # Hold one lock for the diagnostic group; a running clone/separation
+        # keeps exclusive GPU access. Import-only checks do not allocate CUDA tensors.
+        with gpu_lock(timeout=0.2):
+            return check(True)
+    except TimeoutError:
+        return check(False)
 
 
 def cmd_doctor(_: argparse.Namespace) -> int:
     env = resolve_environment()
+    health = _doctor_runtime_health(env["runtime_health"])
+    ffmpeg = media_tool_status()
     mel_model_dir = Path(env["mel_model_dir"])
     qwen_model = Path(env["qwen_model"])
-    asr_python = Path(env["asr_python"])
     asr_model = Path(env["asr_model"])
-
     checks = {
         "bundled_python_core": PYTHON_CORE.is_file() and os.access(PYTHON_CORE, os.X_OK),
         "format_converter_binary": FORMAT_BIN.is_file() and os.access(FORMAT_BIN, os.X_OK),
-        "qwen_runtime": bool(env["qwen_runtime_installed"]),
+        "qwen_runtime": health["qwen"]["healthy"],
         "qwen_model": _model_files_complete(qwen_model, QWEN_FILES),
         "qwen_bridge": _managed_bridge_available("qwen"),
-        "mel_runtime": bool(env["separator_runtime_installed"]),
+        "mel_runtime": health["mel"]["healthy"],
         "mel_model": _model_files_complete(mel_model_dir, MEL_FILES),
-        "mel_config": (mel_model_dir / "config_deux_becruily.yaml").is_file(),
-        "mel_ffmpeg": locate_ffmpeg() is not None,
-        "asr_optional": bool(env["asr_runtime_installed"]) and _model_files_complete(asr_model, WHISPER_FILES),
+        "mel_config": (mel_model_dir / MEL_CONFIG).is_file(),
+        "mel_ffmpeg": ffmpeg["ready"],
+        "asr_optional": health["asr"]["healthy"] and _model_files_complete(asr_model, WHISPER_FILES),
     }
-    required = [
-        "bundled_python_core",
-        "format_converter_binary",
-        "qwen_runtime",
-        "qwen_model",
-        "qwen_bridge",
-        "mel_runtime",
-        "mel_model",
-        "mel_config",
-        "mel_ffmpeg",
-    ]
-    core_ready = checks["bundled_python_core"] and checks["format_converter_binary"]
+    def capability(kind: str, required: list[str]) -> dict:
+        missing = [name for name in required if not checks[name]]
+        hardware = health[kind].get("hardware", {})
+        ready = not missing and hardware.get("ready") is True
+        reason = health[kind]["reason"] if not health[kind]["healthy"] else (
+            "缺少：" + ", ".join(missing) if missing else hardware.get("reason", "硬件尚未验证"))
+        return {"ready": ready, "reason": "可用" if ready else reason,
+                "hardware_ready": hardware.get("ready") is True}
+    capabilities = {
+        "format_conversion": {"ready": checks["format_converter_binary"],
+                              "reason": "可用" if checks["format_converter_binary"] else "格式转换器缺失"},
+        "voice_clone": capability("qwen", ["bundled_python_core", "qwen_runtime", "qwen_model", "qwen_bridge", "mel_ffmpeg"]),
+        "separation": capability("mel", ["bundled_python_core", "mel_runtime", "mel_model", "mel_config", "mel_ffmpeg"]),
+        "transcription": capability("asr", ["bundled_python_core", "asr_optional"]),
+    }
     return emit({
         "ok": True,
-        "core_ready": core_ready,
-        "ready": all(checks[key] for key in required),
-        "checks": checks,
+        "core_ready": checks["bundled_python_core"] and checks["format_converter_binary"],
+        "ready": all(capabilities[name]["ready"] for name in ("format_conversion", "voice_clone", "separation")),
+        "checks": checks, "runtime_health": health, "capabilities": capabilities, "media_tools": {"ffmpeg": ffmpeg},
+        "optional_dependencies": {"sox": {"required": False, "reason": "当前 Qwen 12Hz 模型不使用 25Hz SoX 归一化路径"}},
         "paths": {
             "data": str(DATA_DIR), "cache": str(CACHE_DIR), "voices": str(VOICE_DIR),
-            "models": str(MODEL_DIR), "runtime": str(RUNTIME_DIR),
-            "python_core": str(PYTHON_CORE),
+            "models": str(MODEL_DIR), "runtime": str(RUNTIME_DIR), "python_core": str(PYTHON_CORE),
             "qwen_model": str(qwen_model), "mel_model_dir": str(mel_model_dir),
-            "ffmpeg": str(locate_ffmpeg() or ""),
-            "asr_model": str(asr_model),
+            "ffmpeg": ffmpeg["path"], "asr_model": str(asr_model),
         },
     })
+
+
 def cmd_convert(args: argparse.Namespace) -> int:
     ensure_dirs()
     src = Path(args.input).expanduser().resolve()
@@ -395,10 +478,12 @@ def cmd_separate(args: argparse.Namespace) -> int:
 
     try:
         ffmpeg = locate_ffmpeg()
-        mel_path = os.environ.get("PATH", "")
-        if ffmpeg:
-            mel_path = str(ffmpeg.parent) + os.pathsep + mel_path
-        mel_env["PATH"] = mel_path
+        if not ffmpeg:
+            return emit({"ok": False, "error": "没有可执行的 FFmpeg，请修复运行环境。"}, 3)
+        mel_env.update(ffmpeg_environment(ffmpeg, {"PATH": os.environ.get("PATH", "")}))
+        mel_env["PYTHONPATH"] = str(env["mel_site"])
+        mel_env["PYTHONNOUSERSITE"] = "1"
+        mel_env["SPP_RUNTIME_ROOT"] = str(RUNTIME_DIR)
         with gpu_lock():
             proc = run_capture(cmd, mel_env)
         if proc.returncode != 0:
@@ -458,9 +543,12 @@ def bridge_clone(ref_audio: Path, text: str, ref_text: str, output_dir: Path,
         bridge_env["PYTHONPATH"] = str(env_cfg["qwen_site"])
 
     ffmpeg = locate_ffmpeg()
-    if ffmpeg:
-        bridge_env["SPP_FFMPEG"] = str(ffmpeg)
-        bridge_env["PATH"] = str(ffmpeg.parent) + os.pathsep + os.environ.get("PATH", "")
+    if not ffmpeg:
+        raise RuntimeError("没有可执行的 FFmpeg，请修复运行环境。")
+    tool_env = ffmpeg_environment(ffmpeg, {"PATH": os.environ.get("PATH", "")})
+    tool_env.update(bridge_env)
+    bridge_env = tool_env
+    bridge_env["SPP_RUNTIME_ROOT"] = str(RUNTIME_DIR)
 
     with gpu_lock():
         proc = run_capture(cmd, bridge_env)
@@ -523,6 +611,11 @@ def _marker_exists(folder: Path) -> bool:
     return (folder / "installed.json").is_file()
 
 
+def _linked_runtime_health(name: str) -> dict:
+    return {"installed": True, "healthy": False, "status": "repair_required", "source": "linked",
+            "reason": f"外部 {name} 环境未经应用验证；修复运行环境后将优先使用托管环境"}
+
+
 def resolve_environment() -> dict:
     ensure_dirs()
     settings = load_settings()
@@ -537,53 +630,46 @@ def resolve_environment() -> dict:
         MODEL_DIR / "Mel-Deux",
     )
 
+    health = {kind: _runtime_health(kind) for kind in ("qwen", "mel", "asr")}
     qwen_link = Path(paths["qwen_python"]).expanduser() if paths.get("qwen_python") else None
-    qwen_managed = (
-        _marker_exists(QWEN_RUNTIME_DIR)
-        and (QWEN_SITE / "qwen_tts").exists()
-        and PYTHON_CORE.is_file()
-    )
-    if qwen_link and qwen_link.is_file():
-        qwen_python = qwen_link
-        qwen_python_source = "linked"
-        qwen_runtime_installed = True
-    elif qwen_managed:
+    qwen_managed = health["qwen"]["healthy"]
+    if qwen_managed:
         qwen_python = PYTHON_CORE
         qwen_python_source = "managed"
         qwen_runtime_installed = True
+    elif qwen_link and qwen_link.is_file():
+        qwen_python = qwen_link
+        qwen_python_source = "linked"
+        qwen_runtime_installed = True
+        health["qwen"] = _linked_runtime_health("Qwen")
     else:
         qwen_python = PYTHON_CORE
         qwen_python_source = "missing"
         qwen_runtime_installed = False
 
     separator_link = Path(paths["separator_bin"]).expanduser() if paths.get("separator_bin") else None
-    mel_managed = (
-        _marker_exists(MEL_RUNTIME_DIR)
-        and (MEL_SITE / "audio_separator").exists()
-        and (MEL_SITE / "onnxruntime").exists()
-        and _mel_registry_ready(MEL_SITE)
-        and _managed_bridge_available("mel")
-        and PYTHON_CORE.is_file()
-    )
-    if separator_link and separator_link.is_file():
-        separator_bin = separator_link
-        separator_source = "linked"
-        separator_runtime_installed = True
-    elif mel_managed:
+    mel_managed = health["mel"]["healthy"] and _managed_bridge_available("mel")
+    if mel_managed:
         separator_bin = MEL_BRIDGE
         separator_source = "managed"
         separator_runtime_installed = True
+    elif separator_link and separator_link.is_file():
+        separator_bin = separator_link
+        separator_source = "linked"
+        separator_runtime_installed = True
+        health["mel"] = _linked_runtime_health("Mel")
     else:
         separator_bin = MEL_BRIDGE
         separator_source = "missing"
         separator_runtime_installed = False
 
     asr_link = Path(paths["asr_python"]).expanduser() if paths.get("asr_python") else None
-    asr_managed = _marker_exists(ASR_RUNTIME_DIR) and (ASR_SITE / "faster_whisper").is_dir() and PYTHON_CORE.is_file()
-    if asr_link and asr_link.is_file():
-        asr_python, asr_python_source, asr_runtime_installed = asr_link, "linked", True
-    elif asr_managed:
+    asr_managed = health["asr"]["healthy"]
+    if asr_managed:
         asr_python, asr_python_source, asr_runtime_installed = PYTHON_CORE, "managed", True
+    elif asr_link and asr_link.is_file():
+        asr_python, asr_python_source, asr_runtime_installed = asr_link, "linked", True
+        health["asr"] = _linked_runtime_health("Whisper")
     else:
         asr_python, asr_python_source, asr_runtime_installed = PYTHON_CORE, "missing", False
     asr_model, asr_model_source = _pick_path(
@@ -611,6 +697,7 @@ def resolve_environment() -> dict:
         "asr_model": asr_model,
         "asr_model_source": asr_model_source,
         "download_source": settings.get("download_source", "auto"),
+        "runtime_health": health,
     }
 
 
@@ -642,6 +729,7 @@ def cmd_model_status(_: argparse.Namespace) -> int:
         "model_storage": load_settings().get("model_storage", "appdata"),
         "model_root": str(MODEL_DIR),
         "runtime_root": str(RUNTIME_DIR),
+        "runtime_health": env["runtime_health"],
         "runtime_free_bytes": shutil.disk_usage(RUNTIME_DIR).free,
         "python_core": {
             "path": str(PYTHON_CORE),
@@ -908,14 +996,25 @@ def _resolve_pytorch_endpoint_order(source: str, runtime: str) -> list[str]:
     return order
 
 
-def _verify_python_import(kind: str, site: Path) -> subprocess.CompletedProcess:
-    return run_capture(
-        _verify_command(kind, site),
-        {
-            "PYTHONPATH": str(site),
-            "PYTHONNOUSERSITE": "1",
-        },
-    )
+def _verify_python_import(kind: str, site: Path, probe_gpu: bool = True,
+                          gpu_locked: bool = False) -> subprocess.CompletedProcess:
+    env = {"PYTHONPATH": str(site), "PYTHONNOUSERSITE": "1",
+           "SPP_RUNTIME_PROBE_GPU": "1" if probe_gpu else "0"}
+    if kind == "asr":
+        for root in (QWEN_RUNTIME_DIR, MEL_RUNTIME_DIR):
+            dll_dir = root / "site-packages" / "torch" / "lib"
+            if all((dll_dir / name).is_file() for name in ("cublas64_12.dll", "cublasLt64_12.dll")):
+                env["SPP_ASR_CUDA_DLL_DIR"] = str(dll_dir)
+                env["PATH"] = str(dll_dir) + os.pathsep + os.environ.get("PATH", "")
+                break
+    if probe_gpu and not gpu_locked:
+        # Also applies to staging verification and the already-installed fast path.
+        try:
+            with gpu_lock(timeout=0.2):
+                return run_capture(_verify_command(kind, site), env, timeout=60)
+        except TimeoutError:
+            env["SPP_RUNTIME_PROBE_GPU"] = "0"
+    return run_capture(_verify_command(kind, site), env, timeout=60)
 
 
 def _mel_registry_ready(site: Path) -> bool:
@@ -934,11 +1033,31 @@ def _install_mel_registry(site: Path) -> None:
 
 
 def _runtime_installed(kind: str) -> bool:
-    if kind == "qwen":
-        return _marker_exists(QWEN_RUNTIME_DIR) and (QWEN_SITE / "qwen_tts").exists()
-    if kind == "asr":
-        return _marker_exists(ASR_RUNTIME_DIR) and (ASR_SITE / "faster_whisper").exists()
-    return _marker_exists(MEL_RUNTIME_DIR) and (MEL_SITE / "audio_separator").exists() and (MEL_SITE / "onnxruntime").exists() and _mel_registry_ready(MEL_SITE)
+    if not _runtime_health(kind)["healthy"]:
+        return False
+    root = {"qwen": QWEN_RUNTIME_DIR, "mel": MEL_RUNTIME_DIR, "asr": ASR_RUNTIME_DIR}[kind]
+    return probe_ffmpeg(root / "ffmpeg" / "ffmpeg.exe")["ready"]
+
+
+def _promote_runtime(staged: Path, final: Path) -> None:
+    """Same-volume directory promotion with rollback if the replacement fails."""
+    backup = final.with_name(f".{final.name}-runtime-previous-{time.time_ns()}")
+    had_previous = final.exists()
+    if had_previous:
+        os.replace(final, backup)
+    try:
+        os.replace(staged, final)
+    except OSError:
+        if had_previous:
+            # Do not delete either directory if rollback itself fails. The error
+            # includes the retained backup path so the installation is recoverable.
+            try:
+                os.replace(backup, final)
+            except OSError as rollback_error:
+                raise RuntimeError(f"替换失败，原运行环境保留在 {backup}；恢复失败：{rollback_error}") from rollback_error
+        raise
+    if had_previous:
+        shutil.rmtree(backup, ignore_errors=True)
 
 
 def _runtime_install_storage() -> tuple[Path, Path]:
@@ -960,8 +1079,11 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
     if not PYTHON_CORE.is_file() or not os.access(PYTHON_CORE, os.X_OK):
         return emit({"ok": False, "error": "App 内置 Python Core 不可用。"}, 3)
 
-    if _runtime_installed(kind):
-        return emit({"ok": True, "runtime": kind, "installed": True, "already_installed": True})
+    if not getattr(args, "repair", False) and _runtime_installed(kind):
+        health = _live_runtime_health(kind, _runtime_health(kind))
+        if health["healthy"]:
+            return emit({"ok": True, "runtime": kind, "installed": True,
+                         "already_installed": True, "runtime_health": health})
 
     if kind == "qwen":
         packages = QWEN_RUNTIME_PACKAGES
@@ -1039,62 +1161,51 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
             shutil.rmtree(temp_dir, ignore_errors=True)
             continue
 
-        if kind == "asr":
-            verify = _verify_python_import(
-                "asr", site,
-            )
+        try:
+            if kind == "mel":
+                _install_mel_registry(site)
+            verify = _verify_python_import(kind, site)
             if verify.returncode != 0:
-                errors.append(f"{endpoint}: ASR CUDA verification failed: {(verify.stderr or verify.stdout)[-800:]}")
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                continue
-        elif kind == "qwen":
-            verify = _verify_python_import(
-                "qwen", site,
-            )
-            if verify.returncode != 0:
-                errors.append(f"{endpoint}: Qwen CUDA verification failed: {(verify.stderr or verify.stdout)[-800:]}")
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                continue
-        else:
-            _install_mel_registry(site)
-            verify = _verify_python_import(
-                "mel", site,
-            )
-            if verify.returncode != 0:
-                errors.append(f"{endpoint}: Mel import failed: {(verify.stderr or verify.stdout)[-800:]}")
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                continue
-
-            ffmpeg_path = Path(verify.stdout.strip().splitlines()[-1])
-            if not ffmpeg_path.is_file():
-                errors.append(f"{endpoint}: imageio-ffmpeg executable missing")
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                continue
-            ffmpeg_dir = temp_dir / "ffmpeg"
-            ffmpeg_dir.mkdir(parents=True, exist_ok=True)
-            ffmpeg_target = ffmpeg_dir / "ffmpeg.exe"
-            shutil.copy2(ffmpeg_path, ffmpeg_target)
-            ffmpeg_target.chmod(0o755)
-
-        # Remove unpack scratch before moving staged files into final runtime.
-        shutil.rmtree(temp_work, ignore_errors=True)
-        marker = {
-            "runtime": kind,
-            "installed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "python": str(PYTHON_CORE),
-            "packages": packages,
-            "source": endpoint,
-            "torch_source": torch_endpoint,
-        }
-        (temp_dir / "installed.json").write_text(
-            json.dumps(marker, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-
-        if final_dir.exists():
-            backup = RUNTIME_DIR / f".{kind}-runtime-previous-{int(time.time())}"
-            shutil.move(str(final_dir), str(backup))
-        shutil.move(str(temp_dir), str(final_dir))
+                raise RuntimeError("组件导入验证失败：" + (verify.stderr or verify.stdout)[-1000:])
+            verification = _probe_result(verify)
+            if verification.get("python_abi") != f"{sys.version_info.major}.{sys.version_info.minor}":
+                raise RuntimeError("内置 Python Core 与 Worker 的 Python ABI 不一致，请修复应用安装")
+            # Every runtime owns a canonical ffmpeg.exe. pydub/audio-separator
+            # invoke this bare name; imageio's versioned filename alone is insufficient.
+            ffmpeg_errors = []
+            for candidate in sorted((site / "imageio_ffmpeg" / "binaries").glob("ffmpeg*.exe")):
+                try:
+                    media = install_ffmpeg(candidate, temp_dir / "ffmpeg" / "ffmpeg.exe")
+                    break
+                except (OSError, RuntimeError) as exc:
+                    ffmpeg_errors.append(str(exc))
+            else:
+                raise RuntimeError("托管 FFmpeg 验证失败：" + (" | ".join(ffmpeg_errors) or "安装包未提供 FFmpeg"))
+            inventory = distribution_inventory(site)
+            if not inventory:
+                raise RuntimeError("安装缺少 Python 依赖元数据，不能标记为健康")
+            shutil.rmtree(temp_work, ignore_errors=True)
+            marker = {
+                "schema_version": SCHEMA_VERSION, "manifest_id": manifest_id(kind),
+                "runtime": kind, "installed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "python": str(PYTHON_CORE), "python_abi": verification["python_abi"],
+                "packages": packages, "distributions": inventory,
+                "source": endpoint, "torch_source": torch_endpoint,
+                "hardware": verification["hardware"], "ffmpeg_version": media["version"],
+            }
+            (temp_dir / "installed.json").write_text(
+                json.dumps(marker, ensure_ascii=False, indent=2), encoding="utf-8")
+            staged_health = runtime_health(kind, temp_dir)
+            if not staged_health["healthy"]:
+                raise RuntimeError(staged_health["reason"])
+            # Existing jobs keep their runtime until finished. Staging and import
+            # validation never modify the active installation.
+            with gpu_lock(timeout=60):
+                _promote_runtime(temp_dir, final_dir)
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            errors.append(f"{endpoint}: {exc}")
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            continue
 
         print(json.dumps({
             "event": "runtime_install_done",
@@ -1103,7 +1214,9 @@ def cmd_runtime_install(args: argparse.Namespace) -> int:
             "index": endpoint,
             "torch_index": torch_endpoint,
         }, ensure_ascii=False), flush=True)
-        return emit({"ok": True, "runtime": kind, "installed": True, "path": str(final_dir)})
+        return emit({"ok": True, "runtime": kind, "installed": True, "path": str(final_dir),
+                     "repaired": bool(getattr(args, "repair", False)),
+                     "runtime_health": runtime_health(kind, final_dir), "hardware": verification["hardware"]})
 
     return emit({
         "ok": False,
@@ -1637,6 +1750,7 @@ def build_parser() -> argparse.ArgumentParser:
     ri = sub.add_parser("runtime-install")
     ri.add_argument("runtime", choices=["qwen", "mel", "asr"])
     ri.add_argument("--source", choices=["auto", "mirror", "official"])
+    ri.add_argument("--repair", action="store_true", help="暂存验证后替换运行环境，失败保留原安装")
     ri.set_defaults(func=cmd_runtime_install)
     return p
 

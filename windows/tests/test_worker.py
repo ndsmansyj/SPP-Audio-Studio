@@ -1,5 +1,6 @@
 """Model-free Windows worker contract tests: python -m unittest discover -s windows/tests -v."""
 import http.client
+from contextlib import nullcontext
 import hashlib
 import json
 import os
@@ -22,6 +23,42 @@ class WorkerTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.env = {**os.environ, "LOCALAPPDATA": self.tmp.name, "SPP_PYTHON_CORE": sys.executable}
+
+    def load_worker(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("worker_regression", WORKER)
+        worker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(worker)
+        return worker
+
+    def valid_ffmpeg(self, path, **kwargs):
+        return {"ready": True, "path": str(path), "version": "ffmpeg version test", "reason": ""}
+
+    def populate_runtime(self, worker, root, kind):
+        import runtime_manifest
+        site = root / "site-packages"
+        for module in runtime_manifest.MODULES[kind]:
+            (site / module).mkdir(parents=True, exist_ok=True)
+        metadata = site / f"{kind}_test-1.0.dist-info/METADATA"
+        metadata.parent.mkdir(parents=True, exist_ok=True)
+        metadata.write_text(f"Name: {kind}-test\nVersion: 1.0\n")
+        bundled = site / "imageio_ffmpeg/binaries/ffmpeg-test.exe"
+        bundled.parent.mkdir(parents=True, exist_ok=True)
+        bundled.write_bytes(b"test executable")
+        ffmpeg = root / "ffmpeg/ffmpeg.exe"
+        ffmpeg.parent.mkdir(parents=True, exist_ok=True)
+        ffmpeg.write_bytes(b"test executable")
+        if kind == "mel":
+            (site / "audio_separator/models.json").write_text(json.dumps({
+                "roformer_download_list": {worker.MEL_REGISTRY_NAME: {worker.MEL_MODEL: worker.MEL_CONFIG}}}))
+        marker = {"schema_version": worker.SCHEMA_VERSION, "manifest_id": worker.manifest_id(kind),
+                  "distributions": worker.distribution_inventory(site), "hardware": {"ready": False}}
+        (root / "installed.json").write_text(json.dumps(marker))
+
+    def probe_success(self, command, hardware_ready=True):
+        report = {"python_abi": f"{sys.version_info.major}.{sys.version_info.minor}",
+                  "hardware": {"ready": hardware_ready, "reason": "" if hardware_ready else "CUDA 不可用"}}
+        return subprocess.CompletedProcess(command, 0, "SPP_RUNTIME_PROBE=" + json.dumps(report), "SoX could not be found!")
 
     def call(self, *args):
         proc = subprocess.run([sys.executable, str(WORKER), *args], env=self.env,
@@ -410,7 +447,11 @@ class WorkerTests(unittest.TestCase):
                 runtime = Path(self.tmp.name) / name
                 (runtime / "site-packages" / package).mkdir(parents=True)
                 (runtime / "installed.json").write_text("{}")
-                self.assertTrue(worker._runtime_installed(name))
+                self.assertFalse(worker._runtime_installed(name))
+                health = worker._runtime_health(name)
+                self.assertTrue(health["installed"])
+                self.assertFalse(health["healthy"])
+                self.assertEqual(health["status"], "repair_required")
 
     def test_separator_preserves_windows_path_for_ffmpeg(self):
         import importlib.util
@@ -431,10 +472,13 @@ class WorkerTests(unittest.TestCase):
         args = worker.build_parser().parse_args(["separate", str(src), "--format", "WAV"])
         with patch.object(worker, "CACHE_DIR", Path(self.tmp.name)), \
              patch.object(worker, "resolve_environment", return_value={"mel_model_dir": str(mel_dir), "separator_runtime_installed": True, "separator_source": "managed", "mel_site": str(mel_dir)}), \
-             patch.object(worker, "locate_ffmpeg", return_value=Path("C:/tools/ffmpeg.exe")), \
+             patch.object(worker, "locate_ffmpeg", return_value=Path(self.tmp.name) / "tools/ffmpeg.exe"), \
+             patch.object(worker, "gpu_lock", return_value=nullcontext()), \
              patch.object(worker, "run_capture", side_effect=fake_run):
             self.assertEqual(worker.cmd_separate(args), 0)
-        self.assertEqual(capture["PATH"].split(os.pathsep)[0], "C:\\tools")
+        self.assertEqual(capture["PATH"].split(os.pathsep)[0], str(Path(self.tmp.name) / "tools"))
+        self.assertEqual(capture["SPP_FFMPEG"], capture["IMAGEIO_FFMPEG_EXE"])
+        self.assertEqual(capture["SPP_FFMPEG"], capture["FFMPEG_BINARY"])
         self.assertIn(os.environ["PATH"], capture["PATH"])
 
     def test_separator_rejects_unverifiable_linked_runtime(self):
@@ -452,25 +496,27 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("CUDA", output.call_args.args[0])
 
     def test_runtime_install_verifies_windows_imports_without_unix_pip_flags(self):
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("win_worker_install", WORKER)
-        worker = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(worker)
+        worker = self.load_worker()
         commands = []
-        def fake_run(cmd, env=None):
+        def fake_run(cmd, env=None, timeout=None):
             commands.append(cmd)
             if "install" in cmd:
-                site = Path(cmd[cmd.index("--target") + 1])
-                (site / "qwen_tts").mkdir()
-            return subprocess.CompletedProcess(cmd, 0, "QWEN_RUNTIME_OK", "")
-        with patch.object(worker, "CACHE_DIR", Path(self.tmp.name)), \
-             patch.object(worker, "QWEN_RUNTIME_DIR", Path(self.tmp.name) / "managed"), \
+                self.populate_runtime(worker, Path(cmd[cmd.index("--target") + 1]).parent, "qwen")
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            return self.probe_success(cmd, hardware_ready=False)
+        with patch.object(worker, "RUNTIME_DIR", Path(self.tmp.name) / "Runtime"), \
+             patch.object(worker, "QWEN_RUNTIME_DIR", Path(self.tmp.name) / "Runtime/qwen"), \
              patch.object(worker, "_runtime_installed", return_value=False), \
-             patch.object(worker, "_resolve_pypi_endpoint_order", return_value=[worker.PYPI_MIRROR, worker.PYPI_OFFICIAL]), \
+             patch.object(worker, "_resolve_pypi_endpoint_order", return_value=[worker.PYPI_OFFICIAL]), \
              patch.object(worker, "_resolve_pytorch_endpoint_order", return_value=[worker.PYTORCH_CUDA_OFFICIAL]), \
+             patch.object(worker, "gpu_lock", return_value=nullcontext()), \
+             patch("media_tools.probe_ffmpeg", side_effect=self.valid_ffmpeg), \
              patch.object(worker, "run_capture", side_effect=fake_run):
             result = worker.cmd_runtime_install(worker.build_parser().parse_args(["runtime-install", "qwen"]))
+            health = worker._runtime_health("qwen")
         self.assertEqual(result, 0)
+        self.assertTrue(health["healthy"])
+        self.assertFalse(health["hardware"]["ready"])
         self.assertTrue(any("qwen_tts" in " ".join(c) for c in commands))
         self.assertFalse(any("mlx" in " ".join(c) for c in commands))
         self.assertFalse(any("--break-system-packages" in c for c in commands))
@@ -483,8 +529,9 @@ class WorkerTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("win_worker_frozen_commands", WORKER)
         worker = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(worker)
-        python_core = Path("C:/release/python-core/python.exe")
-        worker_exe = "C:/release/worker/SPPWorker/SPPWorker.exe"
+        release = Path(self.tmp.name).resolve() / "release"
+        python_core = release / "python-core/python.exe"
+        worker_exe = str(release / "worker/SPPWorker/SPPWorker.exe")
         with patch.object(worker, "IS_FROZEN", True), \
              patch.object(worker, "PYTHON_CORE", python_core), \
              patch.object(worker.sys, "executable", worker_exe):
@@ -507,7 +554,7 @@ class WorkerTests(unittest.TestCase):
             self.assertTrue(worker._managed_bridge_available("mel"))
             self.assertEqual(
                 worker._bundled_format_binary(),
-                Path("C:/release/worker/bin/format_converter.exe"),
+                release / "worker/bin/format_converter.exe",
             )
 
     def test_development_worker_keeps_normal_python_execution(self):
@@ -532,15 +579,16 @@ class WorkerTests(unittest.TestCase):
         import importlib.util
         spec = importlib.util.spec_from_file_location("win_worker_frozen_core", WORKER)
         worker = importlib.util.module_from_spec(spec)
-        worker_exe = "C:/release/worker/SPPWorker/SPPWorker.exe"
+        release = Path(self.tmp.name).resolve() / "release"
+        worker_exe = str(release / "worker/SPPWorker/SPPWorker.exe")
         with patch.object(sys, "frozen", True, create=True), \
              patch.object(sys, "executable", worker_exe), \
              patch.dict(os.environ, {"SPP_PYTHON_CORE": "C:/wrong/python.exe"}):
             spec.loader.exec_module(worker)
-        self.assertEqual(worker.PYTHON_CORE, Path("C:/release/python-core/python.exe"))
-        self.assertEqual(worker.BRIDGE, Path("C:/release/worker/qwen_bridge.py"))
-        self.assertEqual(worker.MEL_BRIDGE, Path("C:/release/worker/mel_bridge.py"))
-        self.assertEqual(worker.BUNDLED_FORMAT_BIN, Path("C:/release/worker/bin/format_converter.exe"))
+        self.assertEqual(worker.PYTHON_CORE, release / "python-core/python.exe")
+        self.assertEqual(worker.BRIDGE, release / "worker/qwen_bridge.py")
+        self.assertEqual(worker.MEL_BRIDGE, release / "worker/mel_bridge.py")
+        self.assertEqual(worker.BUNDLED_FORMAT_BIN, release / "worker/bin/format_converter.exe")
 
     def test_qwen_bridge_transcribe_uses_python_interpreter(self):
         import importlib.util
@@ -601,7 +649,7 @@ class WorkerTests(unittest.TestCase):
         with patch.object(bridge, "QWEN_MODEL", model_dir), patch.object(bridge, "build_parser", return_value=type("Parser", (), {"parse_args": lambda self: args})()), \
              patch.dict(sys.modules, {"qwen_tts": qwen, "torch": torch, "soundfile": soundfile}), \
              patch.object(bridge.subprocess, "run", side_effect=fake_ffmpeg), \
-             patch.object(bridge.shutil, "which", return_value="C:/tools/ffmpeg.exe"):
+             patch.object(bridge, "find_ffmpeg", return_value="C:/tools/ffmpeg.exe"):
             self.assertEqual(bridge.main(), 0)
         self.assertEqual(generated[0]["language"], "Chinese")
         self.assertEqual(generated[0]["ref_text"], "你好")
@@ -643,6 +691,7 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("compute_type='float16'", commands[0][2])
         self.assertNotIn("mlx", commands[0][2])
 
+    @unittest.skipUnless(sys.platform == "win32", "Requires Windows msvcrt file locks")
     def test_gpu_jobs_use_cross_process_lock(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location("win_worker_lock", WORKER)
@@ -667,17 +716,203 @@ class WorkerTests(unittest.TestCase):
              patch.object(worker, "ASR_SITE", empty), \
              patch.object(worker, "MEL_RUNTIME_DIR", empty), \
              patch.object(worker, "ASR_RUNTIME_DIR", empty), \
+             patch.object(worker, "RUNTIME_DIR", Path(self.tmp.name) / "Runtime"), \
+             patch("media_tools.probe_ffmpeg", side_effect=self.valid_ffmpeg), \
              patch.object(worker.shutil, "which", return_value=None):
-            self.assertEqual(worker.locate_ffmpeg(), binary)
+            resolved = worker.locate_ffmpeg()
+            self.assertEqual(resolved, worker.RUNTIME_DIR / "tools/ffmpeg/ffmpeg.exe")
+            self.assertEqual(resolved.read_bytes(), binary.read_bytes())
 
-    def test_bridge_respects_explicit_ffmpeg_executable(self):
+    def test_bridge_respects_valid_explicit_ffmpeg_executable(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location("win_qwen_ffmpeg", ROOT / "worker/qwen_bridge.py")
         bridge = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(bridge)
-        with patch.dict(os.environ, {"SPP_FFMPEG": "C:/tools/imageio/ffmpeg-win64.exe"}), \
+        executable = Path(self.tmp.name) / "external/ffmpeg.exe"
+        executable.parent.mkdir()
+        executable.write_bytes(b"executable")
+        with patch.dict(os.environ, {"SPP_FFMPEG": str(executable), "SPP_RUNTIME_ROOT": self.tmp.name}), \
+             patch("media_tools.probe_ffmpeg", side_effect=self.valid_ffmpeg), \
              patch.object(bridge.shutil, "which", return_value=None):
-            self.assertEqual(bridge.find_ffmpeg(), "C:/tools/imageio/ffmpeg-win64.exe")
+            self.assertEqual(bridge.find_ffmpeg(), str(executable))
+
+    def test_managed_ffmpeg_wins_over_system_alias(self):
+        self.load_worker()
+        import media_tools
+        root = Path(self.tmp.name)
+        managed = root / "qwen/ffmpeg/ffmpeg.exe"
+        managed.parent.mkdir(parents=True)
+        managed.write_bytes(b"real")
+        alias = root / "alias.exe"
+        alias.write_bytes(b"")
+        with patch.object(media_tools.shutil, "which", return_value=str(alias)), \
+             patch.object(media_tools.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "ffmpeg version 7.1", "")) as run:
+            result = media_tools.resolve_ffmpeg([root / "qwen"], [])
+        self.assertEqual(result["path"], str(managed))
+        self.assertEqual(run.call_args.args[0], [str(managed), "-version"])
+        self.assertEqual(run.call_args.kwargs["timeout"], 5)
+
+    def test_ffmpeg_execution_failure_and_timeout_fall_back(self):
+        self.load_worker()
+        import media_tools
+        root = Path(self.tmp.name)
+        broken = root / "qwen/ffmpeg/ffmpeg.exe"
+        good = root / "mel/ffmpeg/ffmpeg.exe"
+        for path in (broken, good):
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b"")
+        for error in (OSError(193, "%1 is not a valid Win32 application"), subprocess.TimeoutExpired([str(broken)], 5)):
+            with self.subTest(error=error), patch.object(media_tools.shutil, "which", return_value=None), \
+                 patch.object(media_tools.subprocess, "run", side_effect=[error, subprocess.CompletedProcess([], 0, "ffmpeg version 7.1", "")]):
+                result = media_tools.resolve_ffmpeg([root / "qwen", root / "mel"], [])
+            self.assertTrue(result["ready"])
+            self.assertEqual(result["path"], str(good))
+            self.assertEqual(result["failures"][0]["path"], str(broken))
+
+    def test_non_ffmpeg_success_is_not_healthy(self):
+        self.load_worker()
+        import media_tools
+        with patch.object(media_tools.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "not the tool", "")):
+            self.assertFalse(media_tools.probe_ffmpeg(Path("ffmpeg.exe"))["ready"])
+
+    def test_runtime_metadata_drift_requires_repair(self):
+        worker = self.load_worker()
+        root = Path(self.tmp.name) / "qwen"
+        self.populate_runtime(worker, root, "qwen")
+        self.assertTrue(worker.runtime_health("qwen", root)["healthy"])
+        metadata = next((root / "site-packages").glob("*.dist-info/METADATA"))
+        metadata.write_text("Name: changed\nVersion: 99\n")
+        health = worker.runtime_health("qwen", root)
+        self.assertTrue(health["installed"])
+        self.assertFalse(health["healthy"])
+
+    def test_repair_forces_staging_and_failed_verification_preserves_runtime(self):
+        worker = self.load_worker()
+        root = Path(self.tmp.name) / "Runtime"
+        final = root / "qwen"
+        self.populate_runtime(worker, final, "qwen")
+        before = (final / "installed.json").read_bytes()
+        calls = []
+        def fake_run(cmd, env=None, timeout=None):
+            calls.append(cmd)
+            if "install" in cmd:
+                self.populate_runtime(worker, Path(cmd[cmd.index("--target") + 1]).parent, "qwen")
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            return subprocess.CompletedProcess(cmd, 1, "", "ImportError: damaged native library")
+        with patch.object(worker, "RUNTIME_DIR", root), patch.object(worker, "QWEN_RUNTIME_DIR", final), \
+             patch.object(worker, "_runtime_installed", return_value=True) as installed, \
+             patch.object(worker, "_resolve_pypi_endpoint_order", return_value=[worker.PYPI_OFFICIAL]), \
+             patch.object(worker, "_resolve_pytorch_endpoint_order", return_value=[worker.PYTORCH_CUDA_OFFICIAL]), \
+             patch.object(worker, "gpu_lock", return_value=nullcontext()), \
+             patch.object(worker, "run_capture", side_effect=fake_run):
+            code = worker.cmd_runtime_install(worker.build_parser().parse_args(["runtime-install", "qwen", "--repair"]))
+        self.assertEqual(code, 4)
+        installed.assert_not_called()
+        self.assertTrue(any("install" in command for command in calls))
+        self.assertEqual((final / "installed.json").read_bytes(), before)
+        self.assertFalse(list((root / ".spp-install-staging").iterdir()))
+
+    def test_runtime_promotion_failure_rolls_back_previous_installation(self):
+        worker = self.load_worker()
+        root = Path(self.tmp.name)
+        final, staged = root / "qwen", root / "staged"
+        final.mkdir()
+        staged.mkdir()
+        (final / "identity").write_text("previous")
+        (staged / "identity").write_text("replacement")
+        real_replace = os.replace
+        def replace(source, target):
+            if Path(source) == staged:
+                raise PermissionError("runtime locked")
+            return real_replace(source, target)
+        with patch.object(worker.os, "replace", side_effect=replace):
+            with self.assertRaises(PermissionError):
+                worker._promote_runtime(staged, final)
+        self.assertEqual((final / "identity").read_text(), "previous")
+        self.assertEqual((staged / "identity").read_text(), "replacement")
+
+    def test_missing_gpu_does_not_mark_runtime_for_repair(self):
+        worker = self.load_worker()
+        health = {"installed": True, "healthy": True, "status": "ready", "reason": "ok"}
+        with patch.object(worker, "_verify_python_import", return_value=self.probe_success([], hardware_ready=False)):
+            result = worker._live_runtime_health("qwen", health)
+        self.assertTrue(result["healthy"])
+        self.assertEqual(result["status"], "ready")
+        self.assertFalse(result["hardware"]["ready"])
+
+    def test_managed_runtime_is_selected_after_repair_even_with_saved_link(self):
+        worker = self.load_worker()
+        linked = Path(self.tmp.name) / "external-python.exe"
+        linked.write_bytes(b"external")
+        def healthy(kind):
+            return {"installed": kind == "qwen", "healthy": kind == "qwen",
+                    "status": "ready" if kind == "qwen" else "missing", "reason": "test"}
+        with patch.object(worker, "load_settings", return_value={"paths": {"qwen_python": str(linked)}}), \
+             patch.object(worker, "_runtime_health", side_effect=healthy), patch.object(worker, "ensure_dirs"):
+            env = worker.resolve_environment()
+        self.assertEqual(env["qwen_python_source"], "managed")
+        self.assertEqual(env["qwen_python"], worker.PYTHON_CORE)
+        self.assertTrue(env["runtime_health"]["qwen"]["healthy"])
+        self.assertTrue(linked.is_file())
+        with patch.object(worker, "load_settings", return_value={"paths": {"qwen_python": str(linked)}}), \
+             patch.object(worker, "_runtime_health", return_value={"installed": False, "healthy": False, "status": "missing", "reason": "test"}), \
+             patch.object(worker, "ensure_dirs"):
+            env = worker.resolve_environment()
+        self.assertEqual(env["qwen_python_source"], "linked")
+        self.assertFalse(env["runtime_health"]["qwen"]["healthy"])
+        self.assertIn("外部", env["runtime_health"]["qwen"]["reason"])
+
+    def test_doctor_busy_gpu_keeps_installation_healthy_and_skips_cuda_probe(self):
+        worker = self.load_worker()
+        health = {"qwen": {"installed": True, "healthy": True, "status": "ready", "reason": "ok"}}
+        captured = []
+        def verify(kind, site, **kwargs):
+            captured.append(kwargs)
+            self.assertFalse(kwargs["probe_gpu"])
+            result = self.probe_success([], hardware_ready=False)
+            report = worker._probe_result(result)
+            report["hardware"].update(status="busy", reason="GPU 正在执行任务")
+            return subprocess.CompletedProcess([], 0, "SPP_RUNTIME_PROBE=" + json.dumps(report), "")
+        with patch.object(worker, "gpu_lock", side_effect=TimeoutError("busy")), \
+             patch.object(worker, "_verify_python_import", side_effect=verify):
+            result = worker._doctor_runtime_health(health)
+        self.assertTrue(result["qwen"]["healthy"])
+        self.assertEqual(result["qwen"]["hardware"]["status"], "busy")
+        self.assertEqual(len(captured), 1)
+
+    def test_staging_verification_skips_cuda_when_gpu_is_busy(self):
+        worker = self.load_worker()
+        with patch.object(worker, "gpu_lock", side_effect=TimeoutError("busy")), \
+             patch.object(worker, "run_capture", return_value=self.probe_success([], False)) as run:
+            result = worker._verify_python_import("qwen", Path(self.tmp.name) / "site-packages")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(run.call_args.args[1]["SPP_RUNTIME_PROBE_GPU"], "0")
+        self.assertEqual(run.call_args.kwargs["timeout"], 60)
+        self.assertIn("qwen_tts", run.call_args.args[0][2])
+
+    def test_runtime_probe_distinguishes_gpu_busy_and_missing_without_failing_imports(self):
+        worker = self.load_worker()
+        modules = {name: ModuleType(name) for name in ("qwen_tts", "torch", "torchaudio", "soundfile", "imageio_ffmpeg")}
+        modules["imageio_ffmpeg"].get_ffmpeg_exe = lambda: "ffmpeg.exe"
+        calls = []
+        modules["torch"].cuda = type("Cuda", (), {"is_available": staticmethod(lambda: calls.append("cuda") or False)})()
+        for probe_gpu, expected_status in (("0", "busy"), ("1", "unavailable")):
+            calls.clear()
+            with self.subTest(probe_gpu=probe_gpu), patch.dict(sys.modules, modules), \
+                 patch.dict(os.environ, {"SPP_RUNTIME_PROBE_GPU": probe_gpu}), patch("builtins.print") as output:
+                exec(compile(worker._verification_script("qwen"), "<probe>", "exec"), {})
+            report = json.loads(output.call_args.args[0].split("=", 1)[1])
+            self.assertFalse(report["hardware"]["ready"])
+            self.assertEqual(report["hardware"]["status"], expected_status)
+            self.assertEqual(calls, [] if probe_gpu == "0" else ["cuda"])
+
+    def test_runtime_requirement_documents_match_manifest(self):
+        self.load_worker()
+        import runtime_manifest
+        for kind, packages in runtime_manifest.PACKAGES.items():
+            lines = (ROOT / f"requirements-{kind}.txt").read_text().splitlines()
+            actual = [line.strip() for line in lines if line.strip() and not line.startswith("#")]
+            self.assertEqual(actual, packages)
 
     def test_run_capture_replaces_undecodable_native_output(self):
         import importlib.util

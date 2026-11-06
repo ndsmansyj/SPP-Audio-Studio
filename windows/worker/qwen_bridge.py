@@ -12,6 +12,10 @@ import tempfile
 import time
 from pathlib import Path
 
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+from media_tools import ffmpeg_environment, resolve_ffmpeg
+
 QWEN_MODEL = Path(os.environ.get("SPP_QWEN_MODEL", "")).expanduser()
 ASR_PY = Path(os.environ.get("SPP_ASR_PY", "")).expanduser()
 ASR_MODEL = Path(os.environ.get("SPP_ASR_MODEL", "")).expanduser()
@@ -44,7 +48,13 @@ _DLL_HANDLES: list[object] = []
 add_managed_dll_directories()
 
 def find_ffmpeg() -> str | None:
-    return os.environ.get("SPP_FFMPEG") or shutil.which("ffmpeg")
+    root = Path(os.environ.get("SPP_RUNTIME_ROOT") or
+                Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "SPP Audio Studio" / "Runtime")
+    runtimes = [root / kind for kind in ("qwen", "mel", "asr")]
+    report = resolve_ffmpeg(runtimes + [root / "tools"],
+                            [folder / "site-packages" for folder in runtimes],
+                            os.environ.get("SPP_FFMPEG"), root / "tools" / "ffmpeg")
+    return report["path"] if report["ready"] else None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -168,7 +178,7 @@ def main() -> int:
 
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
-        raise RuntimeError("未找到 ffmpeg.exe；请加入 PATH")
+        raise RuntimeError("没有可执行的 FFmpeg；请在模型与环境中修复运行环境")
 
     with tempfile.TemporaryDirectory(prefix="spp-qwen-") as tmp:
         tmpdir = Path(tmp)
@@ -176,7 +186,9 @@ def main() -> int:
         proc = subprocess.run(
             [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(ref),
              "-ar", "24000", "-ac", "1", str(wav)],
-            capture_output=True, text=True
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=120, env=ffmpeg_environment(Path(ffmpeg)),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if proc.returncode != 0 or not wav.is_file():
             raise RuntimeError("参考音频转换失败：" + (proc.stderr or proc.stdout)[-500:])

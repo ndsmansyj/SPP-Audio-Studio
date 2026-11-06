@@ -2,10 +2,11 @@
 import hashlib
 import importlib.util
 import io
+import json
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -107,9 +108,20 @@ class DownloadRecoveryTest(unittest.TestCase):
         captured = []
         def fake_capture(_cmd, env=None):
             captured.append(env)
+            site = Path(_cmd[_cmd.index("--target") + 1])
+            for module in ("faster_whisper", "ctranslate2", "imageio_ffmpeg"):
+                (site / module).mkdir(parents=True, exist_ok=True)
+            metadata = site / "faster_whisper-1.2.1.dist-info/METADATA"
+            metadata.parent.mkdir()
+            metadata.write_text("Name: faster-whisper\nVersion: 1.2.1\n")
+            ffmpeg = site / "imageio_ffmpeg/binaries/ffmpeg-test.exe"
+            ffmpeg.parent.mkdir()
+            ffmpeg.write_bytes(b"test executable")
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         def fake_verify(_kind, _site):
-            return SimpleNamespace(returncode=0, stdout="ASR_RUNTIME_OK", stderr="")
+            report = {"python_abi": f"{sys.version_info.major}.{sys.version_info.minor}",
+                      "hardware": {"ready": False, "reason": "CUDA unavailable"}}
+            return SimpleNamespace(returncode=0, stdout="SPP_RUNTIME_PROBE=" + json.dumps(report), stderr="")
         with patch.object(worker, "RUNTIME_DIR", root), \
              patch.object(worker, "ASR_RUNTIME_DIR", root / "asr"), \
              patch.object(worker, "PYTHON_CORE", Path(sys.executable)), \
@@ -117,6 +129,8 @@ class DownloadRecoveryTest(unittest.TestCase):
              patch.object(worker, "_resolve_pypi_endpoint_order", return_value=[worker.PYPI_OFFICIAL]), \
              patch.object(worker, "_verify_python_import", side_effect=fake_verify), \
              patch.object(worker, "run_capture", side_effect=fake_capture), \
+             patch.object(worker, "gpu_lock", return_value=nullcontext()), \
+             patch("media_tools.probe_ffmpeg", side_effect=lambda path: {"ready": True, "path": str(path), "version": "ffmpeg version test", "reason": ""}), \
              patch.object(worker, "ensure_dirs"), redirect_stdout(io.StringIO()):
             result = worker.cmd_runtime_install(SimpleNamespace(runtime="asr", source="official"))
         self.assertEqual(result, 0)
