@@ -29,7 +29,8 @@ function Get-VsInstallationPath {
     if (-not $vswhere) { return $null }
     $arguments = @('-latest', '-products', '*', '-requires', 'Microsoft.Component.MSBuild')
     if ($RequireUniversalBuildTools) {
-        $arguments += 'Microsoft.VisualStudio.Workload.UniversalBuildTools'
+        # Enterprise/Community runners provide the same compiler components.
+        $arguments += 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64'
     }
     $arguments += @('-property', 'installationPath')
     $installation = (& $vswhere @arguments | Select-Object -First 1)
@@ -40,7 +41,7 @@ function Get-VsInstallationPath {
 function Get-VsMsBuildPath {
     $installation = Get-VsInstallationPath -RequireUniversalBuildTools
     if (-not $installation) {
-        throw 'Visual Studio Build Tools with Universal Windows Platform build tools is required. Run windows/bootstrap.ps1 -InstallMissing.'
+        throw 'Visual Studio MSBuild and the C++ x64/x86 build tools are required. Run windows/bootstrap.ps1 -InstallMissing.'
     }
     $msbuild = Join-Path $installation 'MSBuild\Current\Bin\MSBuild.exe'
     if (-not (Test-Path $msbuild -PathType Leaf)) {

@@ -1,0 +1,108 @@
+name: Windows portable acceptance
+
+on:
+  push:
+    branches: [main, fix/windows-stability-1.0.3]
+    paths:
+      - 'windows/**'
+      - 'assets/default_voice/**'
+      - '.github/workflows/windows.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'windows/**'
+      - 'assets/default_voice/**'
+      - '.github/workflows/windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-portable-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  portable:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.425'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+      - uses: microsoft/setup-msbuild@v2
+      - name: Read release identity from source
+        id: identity
+        run: |
+          [xml]$project = Get-Content windows/src/SPPAudioStudio.Windows/SPPAudioStudio.Windows.csproj -Raw
+          $version = @($project.Project.PropertyGroup.Version | Where-Object { $_ })[0].ToString()
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid source version: $version" }
+          $commit = (git rev-parse HEAD).Trim()
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "commit=$commit" >> $env:GITHUB_OUTPUT
+          "short=$($commit.Substring(0, 12))" >> $env:GITHUB_OUTPUT
+      - name: Bootstrap packaging environment
+        run: ./windows/bootstrap.ps1
+      - name: Python worker and package regressions
+        run: |
+          & ./windows/.venv/Scripts/python.exe -m unittest discover -s windows/tests -p 'test_*.py' -v
+          if ($LASTEXITCODE -ne 0) { throw 'Python regression tests failed.' }
+      - name: C# Core and converter tests
+        run: |
+          Get-ChildItem windows/tests -Recurse -Filter '*Tests.csproj' | ForEach-Object {
+            dotnet test $_.FullName --configuration Release --logger trx --results-directory "$env:GITHUB_WORKSPACE/windows/artifacts/test-results"
+            if ($LASTEXITCODE -ne 0) { throw "C# tests failed: $($_.FullName)" }
+          }
+      - name: Build every portable component from this commit
+        run: ./windows/publish.ps1 -Version '${{ steps.identity.outputs.version }}'
+      - name: Verify ZIP and extract into a path with spaces and Chinese characters
+        run: |
+          $archive = "windows/artifacts/packages/SPPAudioStudio-${{ steps.identity.outputs.version }}-win-x64.zip"
+          python windows/ci/verify_portable.py --zip $archive --sha256-file "$archive.sha256" --version '${{ steps.identity.outputs.version }}' --commit '${{ steps.identity.outputs.commit }}' --extract-to "$env:RUNNER_TEMP/便携验收 有空格"
+          if ($LASTEXITCODE -ne 0) { throw 'Portable ZIP verification failed.' }
+      - name: Probe shipped Python and frozen worker
+        run: |
+          $root = "$env:RUNNER_TEMP/便携验收 有空格/SPP Audio Studio"
+          $env:PYTHONDONTWRITEBYTECODE = '1'
+          & "$root/python-core/python.exe" -B -I -c 'import ssl, sqlite3, ctypes, pip; print("portable Python OK")'
+          if ($LASTEXITCODE -ne 0) { throw 'Bundled Python failed.' }
+          & "$root/python-core/python.exe" -B -I -m pip --version
+          if ($LASTEXITCODE -ne 0) { throw 'Bundled pip failed.' }
+          foreach ($command in @('doctor', 'model-status')) {
+            $output = & "$root/worker/SPPWorker/SPPWorker.exe" $command
+            if ($LASTEXITCODE -ne 0) { throw "Frozen worker failed: $command" }
+            $result = ($output | Select-Object -Last 1) | ConvertFrom-Json
+            if ($result.ok -ne $true) { throw "Frozen worker rejected: $command" }
+            if ($command -eq 'doctor' -and $result.core_ready -ne $true) { throw 'Shipped Python/converter core is not usable.' }
+          }
+          $version = (Get-Item "$root/app/SPPAudioStudio.Windows.exe").VersionInfo.FileVersion
+          if ($version -ne '${{ steps.identity.outputs.version }}.0') { throw "Wrong GUI binary version: $version" }
+      - name: Run real WinUI pages and asynchronous environment refresh
+        run: |
+          ./windows/tests/launch_smoke.ps1 -Executable "$env:RUNNER_TEMP/便携验收 有空格/SPP Audio Studio/app/SPPAudioStudio.Windows.exe" -ReportPath "$env:GITHUB_WORKSPACE/windows/artifacts/test-results/gui-smoke.json" -ExpectedVersion '${{ steps.identity.outputs.version }}' -TimeoutSeconds 180
+      - name: Upload tested release assets without publishing
+        uses: actions/upload-artifact@v4
+        with:
+          name: SPPAudioStudio-${{ steps.identity.outputs.version }}-win-x64-${{ steps.identity.outputs.short }}
+          path: windows/artifacts/packages/*
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+      - name: Preserve acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-acceptance-${{ steps.identity.outputs.short }}
+          path: windows/artifacts/test-results/
+          if-no-files-found: warn
+          retention-days: 30

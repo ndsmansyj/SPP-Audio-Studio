@@ -21,12 +21,22 @@ public partial class App : Application
                     System.Text.Encoding.UTF8);
             }
             catch { }
+            if (SmokeTestReport.Enabled) SmokeTestReport.Fail(args.Exception);
         };
     }
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
-        _window = new MainWindow();
-        _window.Activate();
+        try
+        {
+            var mainWindow = new MainWindow(SmokeTestReport.Enabled);
+            _window = mainWindow;
+            _window.Activate();
+            if (SmokeTestReport.Enabled) _ = mainWindow.RunSmokeTestAsync();
+        }
+        catch (Exception error) when (SmokeTestReport.Enabled)
+        {
+            SmokeTestReport.Fail(error);
+        }
     }
 }

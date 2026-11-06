@@ -42,7 +42,7 @@ python windows/worker/spp_worker.py voice-list
 
 AI 推理保持 CUDA-only：Qwen 使用 SDPA + BF16，Whisper 使用 CTranslate2 CUDA FP16，Mel 在入口检查 CUDA。缺少 CUDA 时给出失败原因，不自动切到 CPU。跨进程 `gpu.lock` 串行化 AI 任务，避免并发争抢显存。
 
-运行环境的直接依赖版本见 `requirements-qwen.txt`、`requirements-mel.txt`、`requirements-asr.txt`。这三个文件与安装指纹用于识别环境版本；它们不是所有传递依赖的离线 wheel 锁文件。SPP 使用 Qwen3-TTS **12Hz** 模型，不因可选 25Hz 路径的 SoX 导入告警阻断 12Hz 工作流。
+运行环境安装配方以 `worker/runtime_manifest.py` 为准，直接依赖也列在 `requirements-qwen.txt`、`requirements-mel.txt`、`requirements-asr.txt`。安装记录包含配方指纹、Python ABI 和实际安装的依赖元数据；这些记录不是所有传递依赖的离线 wheel 锁文件。旧版运行环境缺少新版验证记录时会提示修复，模型与声音模板继续保留。SPP 使用 Qwen3-TTS **12Hz** 模型，不因可选 25Hz 路径的 SoX 导入告警阻断 12Hz 工作流。
 
 ### 存储与磁盘空间
 

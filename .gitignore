@@ -12,8 +12,8 @@ release/
 *.zip
 *.obj
 
-# Test outputs
-tests/
+# Generated test outputs at the repository root; windows/tests contains source.
+/tests/
 __pycache__/
 *.pyc
 *.part

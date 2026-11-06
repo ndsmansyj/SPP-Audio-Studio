@@ -55,7 +55,7 @@ try {
 
     $installation = Get-VsInstallationPath -RequireUniversalBuildTools
     $hasBuildTools = [bool]$installation
-    if ($hasBuildTools) { Write-Host "MSBuild/UWP toolchain: $installation" }
+    if ($hasBuildTools) { Write-Host "MSBuild/C++ toolchain: $installation" }
     if (-not $hasBuildTools) { $missing.Add('Microsoft.VisualStudio.2022.BuildTools') }
 
     if ($missing.Count -gt 0 -and -not $InstallMissing) {
@@ -67,7 +67,7 @@ try {
             if ($id -eq 'Microsoft.VisualStudio.2022.BuildTools') {
                 Install-WingetPackage $id @(
                     '--override',
-                    '--wait --passive --norestart --add Microsoft.VisualStudio.Workload.UniversalBuildTools --includeRecommended'
+                    '--wait --passive --norestart --add Microsoft.VisualStudio.Workload.UniversalBuildTools --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended'
                 )
             } else {
                 Install-WingetPackage $id
@@ -92,7 +92,6 @@ try {
 
     if (-not $SkipPythonPackages) {
         $venvPython = Get-VenvPython
-        Invoke-Native $venvPython '-m' 'pip' 'install' '--disable-pip-version-check' '--upgrade' 'pip'
         Invoke-Native $venvPython '-m' 'pip' 'install' '--disable-pip-version-check' '-r' (Join-Path $PSScriptRoot 'requirements-build.txt')
 
         $workerRoot = Join-Path $PSScriptRoot 'worker'
