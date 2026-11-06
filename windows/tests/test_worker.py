@@ -901,6 +901,7 @@ class WorkerTests(unittest.TestCase):
                                             return_value=[worker.PYPI_OFFICIAL, "https://second.example/simple"]))
             stack.enter_context(patch.object(worker, "gpu_lock", return_value=nullcontext()))
             stack.enter_context(patch.object(worker, "run_capture", side_effect=execute))
+            stack.enter_context(patch.object(worker, "probe_ffmpeg", side_effect=self.valid_ffmpeg))
             stack.enter_context(patch("media_tools.probe_ffmpeg", side_effect=self.valid_ffmpeg))
             yield worker, final, sites
 
@@ -967,6 +968,48 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual((backups[0] / "identity").read_text(), "previous")
             self.assertIn(str(backups[0]), result["error"])
             self.assertIn(str(sites[0].parent), result["error"])
+
+    def test_interrupted_activation_can_resume_without_redownloading(self):
+        with self.runtime_activation_case() as (worker, final, sites):
+            replace = os.replace
+
+            def interrupt_activation(source, destination):
+                if Path(source).parent.name == ".spp-install-staging" and Path(destination) == final:
+                    raise KeyboardInterrupt("worker interrupted after backing up the old runtime")
+                return replace(source, destination)
+
+            with patch.object(worker.os, "replace", side_effect=interrupt_activation):
+                with self.assertRaises(KeyboardInterrupt):
+                    self.install_asr_for_test(worker)
+            self.assertEqual(len(list(final.parent.glob(".asr-runtime-previous-*"))), 1)
+            code, result = self.install_asr_for_test(worker)
+            self.assertEqual(code, 0)
+            self.assertTrue(result["runtime_health"]["healthy"])
+            self.assertEqual(len(sites), 1, "An interrupted commit must leave enough state to resume")
+
+    def test_repair_does_not_reuse_damaged_or_mislabeled_staging(self):
+        for corruption in ("missing_module", "wrong_runtime"):
+            with self.subTest(corruption=corruption), self.runtime_activation_case() as (worker, final, sites):
+                replace = os.replace
+
+                def deny_activation(source, destination):
+                    if Path(source).parent.name == ".spp-install-staging" and Path(destination) == final:
+                        raise PermissionError("directory is busy")
+                    return replace(source, destination)
+
+                with patch.object(worker.os, "replace", side_effect=deny_activation):
+                    self.install_asr_for_test(worker)
+                staged = sites[0].parent
+                if corruption == "missing_module":
+                    (sites[0] / "ctranslate2").rmdir()
+                else:
+                    marker = json.loads((staged / "installed.json").read_text())
+                    marker["runtime"] = "qwen"
+                    (staged / "installed.json").write_text(json.dumps(marker))
+                code, result = self.install_asr_for_test(worker)
+                self.assertEqual(code, 0)
+                self.assertTrue(result["runtime_health"]["healthy"])
+                self.assertEqual(len(sites), 2, "Invalid cached data must go through a fresh verified install")
 
     def test_missing_gpu_does_not_mark_runtime_for_repair(self):
         worker = self.load_worker()

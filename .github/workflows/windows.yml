@@ -2,7 +2,7 @@ name: Windows portable acceptance
 
 on:
   push:
-    branches: [main, fix/windows-stability-1.0.3]
+    branches: [main]
     paths:
       - 'windows/**'
       - 'assets/default_voice/**'
@@ -88,6 +88,10 @@ jobs:
           }
           $version = (Get-Item "$root/app/SPPAudioStudio.Windows.exe").VersionInfo.FileVersion
           if ($version -ne '${{ steps.identity.outputs.version }}.0') { throw "Wrong GUI binary version: $version" }
+      - name: Repair real ASR runtime under Windows directory contention
+        timeout-minutes: 20
+        run: |
+          ./windows/tests/runtime_install_smoke.ps1 -WorkerExecutable "$env:RUNNER_TEMP/便携验收 有空格/SPP Audio Studio/worker/SPPWorker/SPPWorker.exe" -ReportPath "$env:GITHUB_WORKSPACE/windows/artifacts/test-results/runtime-install-smoke.json"
       - name: Run real WinUI pages and asynchronous environment refresh
         run: |
           ./windows/tests/launch_smoke.ps1 -Executable "$env:RUNNER_TEMP/便携验收 有空格/SPP Audio Studio/app/SPPAudioStudio.Windows.exe" -ReportPath "$env:GITHUB_WORKSPACE/windows/artifacts/test-results/gui-smoke.json" -ExpectedVersion '${{ steps.identity.outputs.version }}' -TimeoutSeconds 180
